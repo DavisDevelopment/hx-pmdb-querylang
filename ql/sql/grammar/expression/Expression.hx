@@ -6,18 +6,9 @@ import ql.sql.TsAst.SqlAstNode;
 import ql.sql.grammar.CommonTypes;
 
 class Expression extends SqlAstNode implements FunctionArgument {
-    final expr_key:Int = HashKey.next();
+    final expr_key:Int = pm.HashKey.next();
     public function new() {
         _init_();
-    }
-
-    public function _betty() {
-        haxe.Serializer.USE_CACHE = true;
-        Console.println(haxe.Serializer.run(this));
-    }
-
-    public function cloneExpression():E {
-        return Type.createEmptyInstance(Type.getClass(this));
     }
 }
 
@@ -54,10 +45,10 @@ class StringValue extends ConstantValue<String> {}
 // class UStringValue extends ConstantValue<UnicodeString> {}
 class FloatValue extends ConstantValue<Float> {}
 class IntValue extends ConstantValue<Int> {}
-class NullValue extends ConstantValue<pm.Noise> {
+class NullValue extends ConstantValue<Dynamic> {
     // public static var instance = new NullValue();
     public function new() {
-        super(Noise);
+        super(null);
     }
 }
 
@@ -83,6 +74,40 @@ class ListExpression extends Expression implements FunctionArgument {
 
         // })
     }
+}
+
+class ParameterExpression extends Expression implements FunctionArgument {
+    public var label: SqlSymbol;
+    public var offset: Int;
+
+    public function new(label, offset) {
+        super();
+        this.label = label;
+        this.offset = offset;
+    }
+}
+
+abstract PredicateExpr (EPredicate) from EPredicate to EPredicate {
+    @:from
+    public static function ofPredicateInstance(node: Predicate):PredicateExpr {
+        if ((node is RelationPredicate)) {
+            return Relation(cast node);
+        }
+        if ((node is InPredicate)) {
+            return In(cast node);
+        }
+        if ((node is NotPredicate)) {
+            return Not(cast node);
+        }
+
+        throw new pm.Error('Unexpected $node');
+    }
+}
+
+enum EPredicate {
+    Relation(node: RelationPredicate);
+    Not(node: NotPredicate);// should probably be its own enum(?)
+    In(node: InPredicate);
 }
 
 class Predicate extends E {
@@ -124,8 +149,7 @@ enum ParamBinding {
     PNamed(name: SqlSymbol);
 }
 enum ListExprData {
-    LParam(p: ParamBinding);
-    LExpr(e: ListExpression);
+    LExpression(e: Expression);
     LSubSelect(select: SelectStatement);
 }
 enum ListType {
@@ -159,6 +183,7 @@ class AndPredicate extends CompoundPredicate {
         super(ELogicalOperator.OpBoolAnd, l, r);
     }
 }
+
 class OrPredicate extends CompoundPredicate {public function new(l, r){super(ELogicalOperator.OpBoolOr, l, r);}}
 
 class ColumnName extends Expression {
@@ -200,7 +225,10 @@ typedef Function = {
     symbol:SqlSymbol, 
     kind:FunctionKind
 };
-enum FunctionKind {Simple;}
+enum FunctionKind {
+    Simple;
+    Aggregate;
+}
 class FunctionCallBase<Arg> extends Expression implements FunctionArgument {
     public var func: Function;
     public var args:Array<Arg>;
@@ -211,6 +239,10 @@ class FunctionCallBase<Arg> extends Expression implements FunctionArgument {
         this.func = f;
         this.args = args;
     }
+    public var symbol(get, never):SqlSymbol;
+    private inline function get_symbol():SqlSymbol return func.symbol;
+    public var kind(get, never):FunctionKind;
+    private inline function get_kind():FunctionKind return func.kind;
 }
 class SimpleFunctionCall extends FunctionCallBase<Expression> {
     public function new(f:SqlSymbol, args) {

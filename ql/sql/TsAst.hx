@@ -247,7 +247,44 @@ abstract SelectElement (ESelectElement) from ESelectElement to ESelectElement {
     
     @:from 
     public static function fromSqlAstNode(node: SqlAstNode):SelectElement {
-        return ESelectElement.createByName(node.nodeType.getName(), [node]);
+        var e = ESelectElement, ea = EAliasedSelectElement;
+        // return ESelectElement.createByName(node.nodeType.getName(), [node]);
+        if ((node is ql.sql.ColumnName)) {
+            return e.ColumnName(cast(node, ColumnName));
+        }
+
+        if ((node is ql.sql.AllColumns)) {
+            return e.AllColumns(cast node);
+        }
+
+        if ((node is ql.sql.FunctionCall)) {
+            return e.FunctionCall(cast(node, ql.sql.FunctionCall));
+        }
+
+        if ((node is ql.sql.grammar.expression.Expression)) {
+            return e.Expression(cast node);
+        }
+
+        if ((node is ql.sql.AssignedTerm<Dynamic>)) {
+            return ESelectElement.AssignedTerm(cast node);
+        }
+
+        if ((node is ql.sql.AliasedTerm<SqlAstNode>)) {
+            var node:AliasedTerm<SqlAstNode> = cast node;
+            if ((node.term is ql.sql.ColumnName)) {
+                return ESelectElement.AliasedTerm(ColumnName(cast node));
+            }
+            if ((node.term is ql.sql.FunctionCall)) {
+                return ESelectElement.AliasedTerm(FunctionCall(cast node));
+            }
+            if ((node.term is ql.sql.grammar.expression.Expression)) {
+                return ESelectElement.AliasedTerm(EAliasedSelectElement.Expression(cast node));
+            }
+
+			throw new pm.Error('Unexpected ${node.term.nodeType}, ${Type.getClassName(Type.getClass(node.term))}');
+        }
+
+        throw new pm.Error('Unexpected ${node.nodeType}, ${Type.getClassName(Type.getClass(node))}');
     }
 
     @:to
@@ -273,9 +310,25 @@ enum ESelectElement {
     FunctionCall(el: FunctionCall);
     Expression(el: Expression);
     AssignedTerm(el: AssignedTerm<Expression>);
-    AliasedTerm(el: Or3<AliasedTerm<ColumnName>, AliasedTerm<FunctionCall>, AliasedTerm<AssignedTerm<Expression>>>);
+    AliasedTerm(el: EAliasedSelectElement);//Or3<AliasedTerm<ColumnName>, AliasedTerm<FunctionCall>, AliasedTerm<AssignedTerm<Expression>>>);
 }
+enum EAliasedSelectElement {
+    ColumnName(el: AliasedTerm<ColumnName>);
+    FunctionCall(el: AliasedTerm<FunctionCall>);
+    Expression(el: AliasedTerm<Expression>);
+    AssignedTerm(el: AliasedTerm<AssignedTerm<Expression>>);
+}
+/*
+class AliasedSelectElement extends SqlAstNode {
+    public var alias:SqlSymbol;
+    public var data: EAliasedSelectElement;
 
+    public function new(alias, data) {
+        this.alias = alias;
+        this.data = data;
+    }
+}
+*/
 
 // @SqlNodeMarker(SqlNodeType.AllColumns)
 class AllColumns extends SqlAstNode {
@@ -304,6 +357,9 @@ AggregatedWindowFunction
 SimpleFunctionCall
 PasswordFunction 
 */
+/**
+  [TODO] consider removing these types, in favor of the FunctionCall types defined in the Expression module
+ **/
 typedef FunctionCall = IFunctionCall;
 class IFunctionCall extends SqlAstNode implements FunctionArgument {}
 
@@ -367,7 +423,7 @@ class Constant extends SqlAstNode implements FunctionArgument {
 }
 
 // @SqlNodeMarker(SqlNodeType.AliasedTerm)
-@:generic
+// @:generic
 @nodeType('AliasedTerm')
 class AliasedTerm<TTerm:SqlAstNode> extends SqlAstNode {
     public var term:TTerm;
@@ -607,7 +663,8 @@ abstract TableSourceItem (SqlAstNode) to SqlAstNode
         this = n;
     }
 
-    @:to public inline function toTableSpec():TableSpec {
+    @:to 
+    public inline function toTableSpec():TableSpec {
         return cast(this, TableSpec);
     }
 
@@ -634,21 +691,25 @@ class TableSpec extends SqlAstNode {
     }
     @:keep
     public function toString() return tableName.identifier;
+
+    extern inline public function tableInstance():Null<Dynamic> {
+        return tableName.table;
+    }
 }
 
 /*=  NotImplemented */
 typedef IndexHint = NotImplemented;
 
-// @// @SqlNodeMarker(SqlNodeType.WhereClause)
 class WhereClause extends SqlAstNode {
-    // public var expression:Expression;
     public var predicate:Predicate;
+
     public function new(predicate) {
-        // this.expression = expression;
+        _init_();
         this.predicate = predicate;
-        this._init_();
     }
-    @:keep public function toString() return Std.string(predicate);
+    
+    @:keep 
+    public function toString() return Std.string(predicate);
 }
 
 // @SqlNodeMarker(SqlNodeType.GroupByClause)
@@ -656,9 +717,9 @@ class GroupByClause extends SqlAstNode {
     public var items:Array<GroupByItem>;
     public var rollup:Bool;
     public function new(items, rollup = false) {
+        this._init_();
         this.items = items;
         this.rollup = rollup;
-        this._init_();
     }
 }
 
@@ -667,9 +728,9 @@ class GroupByItem extends SqlAstNode {
     public var expression:Expression;
     public var descending:Bool;
     public function new(expression:Expression, descending:Bool = false) {
+        this._init_();
         this.expression = expression;
         this.descending = descending;
-        this._init_();
     }
 }
 
@@ -678,7 +739,7 @@ class JoinClause extends SqlAstNode {
     public var joinType: Null<JoinType> = null;
     public var on: Null<Expression> = null;
 
-    @:native('using')
+    @:native('_using_')
     public var used:Null<Array<SqlSymbol>>;          // Using a list of column names within the scope of the tables
 
     public function new(joinWith:TableSourceItem, ?joinType:JoinType, ?joinOn:Expression) {
@@ -696,6 +757,10 @@ class OrderByClause extends SqlAstNode {
         this.expressions = expressions;
         this._init_();
     }
+    public function addExpr(expression:Expression, descending=false):OrderByClause {
+        expressions.push(new OrderByExpression(expression, descending));
+        return this;
+    }
 }
 
 class OrderByExpression extends SqlAstNode {
@@ -703,9 +768,9 @@ class OrderByExpression extends SqlAstNode {
     public var descending:Bool;
 
     public function new(expression:Expression, descending:Bool = false) {
+        this._init_();
         this.expression = expression;
         this.descending = descending;
-        this._init_();
     }
 
     public var sortType(get, never):SortType;
@@ -713,13 +778,13 @@ class OrderByExpression extends SqlAstNode {
 }
 
 class LimitClause extends SqlAstNode {
-    public var limit:Float;
-    public var offset:Float;
+    public var limit:Int;
+    public var offset:Null<Int> = null;
 
-    public function new(limit:Float, ?offset:Float) {
+    public function new(limit:Int, ?offset:Int) {
+        this._init_();
         this.limit = limit;
         this.offset = offset;
-        this._init_();
     }
 }
 

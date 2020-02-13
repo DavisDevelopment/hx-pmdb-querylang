@@ -84,6 +84,17 @@ abstract MathOperator(EMathOperator) from EMathOperator to EMathOperator {
 				throw new pm.Error('Unexpected $s');
 		}
 	}
+
+	@:to
+	public function toBinaryOperator():BinaryOperator {
+		return switch this {
+			case OpMult: BinaryOperator.OpMult;
+			case OpDiv: BinaryOperator.OpDiv;
+			case OpMod: BinaryOperator.OpMod;
+			case OpAdd: BinaryOperator.OpAdd;
+			case OpSubt: BinaryOperator.OpSubt;
+		}
+	}
 }
 
 enum EMathOperator {
@@ -292,6 +303,9 @@ class SqlSymbol {
 	public var type:SqlSymbolType;
 	public var parent : AstSymbol<SqlSymbolType> = null;
 
+	public var table:Null<Dynamic> = null;
+	public var func:Null<Dynamic> = null;
+
 	public function new(id:String, ?type:SqlSymbolType, ?parent:SqlSymbol) {
 		this.identifier = id;
 		this.parent = parent;
@@ -299,5 +313,9 @@ class SqlSymbol {
 			case null: Unknown;
 			case t: t;
 		}
+	}
+
+	public inline function clone(?type:SqlSymbolType):SqlSymbol {
+		return new SqlSymbol(identifier, pm.Helpers.nor(type, this.type));
 	}
 }

@@ -36,6 +36,7 @@ class NewSqlParser {
 	var eofStack : Array<Token>;
 
 	var symbolTable: SymbolTable<SqlSymbolType, SqlSymbol>;
+	var parameters: Array<String>;
 
     /* Constructor Functions */
 	public function new() {
@@ -76,13 +77,13 @@ class NewSqlParser {
 		}
 
 		sqlTypes = [
-			"DATE" => SDate,
+			// "DATE" => SDate,
 			"DATETIME" => SDateTime,
 			"FLOAT" => SFloat,
-			"DOUBLE" => SDouble,
+			// "DOUBLE" => SDouble,
 			"INT" => SInt,
 			"INTEGER" => SInt,
-			"BIGINT" => SBigInt,
+			// "BIGINT" => SBigInt,
 			"TEXT" => SText,
 			"BLOB" => SBlob,
 			"BYTES" => SBlob
@@ -112,6 +113,8 @@ class NewSqlParser {
 		symbolTable = new SymbolTable(function(sym: SqlSymbol) {
 			return sym.identifier;
 		});
+
+		parameters = new Array();
 	}
 
 	static inline function _setup(p:NewSqlParser, s:String){
@@ -163,6 +166,12 @@ class NewSqlParser {
 		#end
 	}
 
+	private inline function _setInput(q: String) {
+		this.query = q;
+		this.pos = 0;
+		cache = [];
+	}
+
 	private inline function push(t) {
 		cache.push( t );
 	}
@@ -203,10 +212,22 @@ class NewSqlParser {
 				return POpen;
 			case ')'.code:
 				return PClose;
+			case '['.code:
+				return Token.BrOpen;
+			case ']'.code:
+				return Token.BrClose;
+			case '{'.code:
+				return Token.CBrOpen;
+			case '}'.code:
+				return Token.CBrClose;
 			case ','.code:
 				return Comma;
 			case '.'.code:
-			    return Dot;
+				return Dot;
+			case ':'.code:
+				return DoubleDot;
+			case '?'.code:
+				return QMark;
 			case '!'.code:
 			    if (nextChar() == '='.code)
 			        return Op(NEq);
@@ -214,7 +235,7 @@ class NewSqlParser {
 				return Not;
 			
 			// operators
-			case _ if (isOpChar(c)):
+			case _ if (#if neko c != null && #end isOpChar(c)):
 				var start = pos - 1;
 				do {
 					c = nextChar();
@@ -222,7 +243,6 @@ class NewSqlParser {
 				while (#if neko c != null && #end isOpChar(c));
 				pos--;
 				var strOp = query.substr(start, pos - start);
-				trace(strOp);
 				if (binops.exists(strOp)) {
 					return Op(binops[strOp]);
 				}
@@ -345,10 +365,16 @@ class NewSqlParser {
 		case CString(k): '"$k"';
 		case Star: "*";
 		case Dot: '.';
+		case DoubleDot: ':';
 	    case Not: '!';
 		case Eof: "<eof>";
 		case POpen: "(";
 		case PClose: ")";
+		case BrOpen: '[';
+		case BrClose: ']';
+		case CBrOpen: '{';
+		case CBrClose: '}';
+		case QMark: "?";
 		case Comma: ",";
 		case Op(o): opStr(o);
 		case CInt(i): "" + i;
@@ -438,69 +464,6 @@ class NewSqlParser {
 
 	function parseSelectElemList():Array<SelectElement> {
 		return parseSelectElementList();
-	    var elems:Array<SelectElement> = [];
-	    while (true) {
-	        switch (token()) {
-                case Star:
-                    elems.push(new AllColumns());
-
-                case Ident(id):
-                    var field:Field = {field: id};
-                    if (maybe(Kwd("AS"))) switch token() {
-                        case Ident(alias):
-                            field.alias = alias;
-
-                        case t:
-                            unexpected( t );
-                    }
-					if (maybe(Token.Dot)) {
-						switch token() {
-							case Star:
-								field.all = true;
-
-							case Ident(id2):
-								field.table = field.field;
-								field.field = id2;
-
-							case tk:
-								unexpected(tk);
-						}
-					}
-					if (maybe(Kwd("AS"))) {
-						switch token() {
-							case Ident(alias):
-								field.alias = alias;
-
-							case t:
-								unexpected(t);
-						}
-					}
-
-					switch field {
-						case {table:tableName, all:true}:
-							elems.push(new AllColumns(symbol(tableName)));
-						
-						case {field:fieldName, alias:null, table:tableName}: 
-							elems.push(new ColumnName(symbol(fieldName), symbol(tableName)));
-						
-						default: 
-							throw new pm.Error('Not okay, sha');
-					}
-
-                case t:
-                    push(t);
-	        }
-
-	        if (maybe(Comma)) {
-				continue;
-			}
-			else {
-				break;
-			}
-	    }
-
-		// throw new pm.Error.WTFError();
-		return elems;
 	}
 
 	function parseSelectElementList() {
@@ -516,7 +479,7 @@ class NewSqlParser {
 				case _:
 					push(t);
 					var expr = parseExpr();
-					trace('' + expr);
+					//trace('' + expr);
 					switch expr {
 						case Expr.CTrue|CFalse|CNull:
 							throw 'Constants disallowed';
@@ -535,6 +498,21 @@ class NewSqlParser {
 							results.push(expression);
 
 						// default:
+					}
+
+					if (maybe(Kwd('AS'))) {
+						var alias =	symbol(ident());
+						var last:ESelectElement = results.pop();
+						switch last {
+							case ColumnName(el):
+								results.push(new AliasedTerm(el, alias));
+
+							case Expression(el):
+								results.push(new AliasedTerm(el, alias));
+
+							case other:
+								throw new pm.Error('Unexpected $other');
+						}
 					}
 			}
 
@@ -710,32 +688,68 @@ class NewSqlParser {
 		switch( t ) {
 		    /* --SELECT STATEMENT-- */
             case Kwd("SELECT"):
-                var fields = parseSelectElemList();
-                req(Kwd("FROM"));
+				var fields = parseSelectElemList();
+				req(Kwd("FROM"));
+				
+				inline function readGroupByClause(q:QueryExpression) {
+					req(Kwd('GROUP'));
+					req(Kwd('BY'));
+					var items:Array<{e:Expr, desc:Bool}> = new Array();
+					while (true) {
+						var groupExpr = parseExpr();
+						var item = {e: groupExpr, desc: false};
+						var tk = token();
+						items.push(item);
+						switch tk {
+							case Kwd('ASC'):
+								item.desc = false;
+	
+							case Kwd('DESC'):
+								item.desc = true;
+	
+							case Comma:
+								continue;
+	
+							case _:
+								push(tk);
+								break;
+						}
+					}
+					var groupByItems = [for (itm in items) new GroupByItem(convertExprToExpression(itm.e), itm.desc)];
+					q.from.groupBy = new GroupByClause(groupByItems);
+				}
+
+				var queryExpression:QueryExpression = new QueryExpression(fields);
+				var src = parseQuerySource();
+				queryExpression.from = new FromClause([new TableSource(src)]);
                 var parseWherePredicate = false;
-                var src = parseQuerySource();
-                try {
+				
+                while (true) try {
                     end();
-                    // cond = Expr.CTrue;
+					// cond = Expr.CTrue;
+					break;
                 }
                 catch(e: SqlError) switch e {
                     case UnexpectedToken(Kwd("WHERE"), _):
 						parseWherePredicate = true;//parseExprNext(parseExpr());
+						break;
+
+					case UnexpectedToken(Kwd("GROUP"), _):
+						push(Kwd('GROUP'));
+						readGroupByClause(queryExpression);
+						continue;
 						
 					case UnexpectedToken(t, _):
 						push(t);
+						break;
 
                     default:
-                        throw 'wtf';
-                }
+                        throw e;
+				}
 
-				var queryExpression:QueryExpression = new QueryExpression(fields);
-				queryExpression.from = new FromClause([new TableSource(src)]);
                 var sel = new SelectStatement(new QueryIntoExpression(queryExpression));
 				if (parseWherePredicate) {
 					var whereExpression = parsePredicate();
-					trace(whereExpression);
-					// queryExpression.from.where = new WhereClause(TsAst.Expression.of(convertExprToExpression(cond)));
 					queryExpression.from.where = new WhereClause(whereExpression);
 				}
 
@@ -744,13 +758,14 @@ class NewSqlParser {
 					if (maybe(Kwd('ORDER'))) {
 						req(Kwd('BY'));
 						var orderExpr = parseExpr();
-						trace(orderExpr);
 						queryExpression.orderBy = new OrderByClause([
 							new OrderByExpression(convertExprToExpression(orderExpr))
 						]);
+						/**
+						  [TODO] parse full `ORDER BY` clause, to SQL spec
+						 **/
 					}
 					else if (maybe(Kwd('LIMIT'))) {
-						trace('LIMIT CLAUSE');
 						var limit:Int = -1;
 						switch token() {
 							case t=CInt(i):
@@ -777,7 +792,7 @@ class NewSqlParser {
 							}
 							queryExpression.limit.offset = offset;
 						}
-						trace(queryExpression.limit);
+						//trace(queryExpression.limit);
 					}
 					/**
 					  [TODO/FIXME] the order of (parsing) operations is incorrect here. 
@@ -785,32 +800,7 @@ class NewSqlParser {
 						  As such, it should be parsed, when present, **before** any `LIMIT|ORDER BY` clauses.
 					 **/
 					else if (maybe(Kwd('GROUP'))) {
-						req(Kwd('BY'));
-						var items:Array<{e:Expr, desc:Bool}> = new Array();
-						while (true) {
-							var groupExpr = parseExpr();
-							var item = {e:groupExpr, desc:false};
-							var tk = token();
-							trace('$tk');
-							items.push(item);
-							switch tk {
-								case Kwd('ASC'):
-									item.desc = false;
-
-								case Kwd('DESC'):
-									item.desc = true;
-
-								case Comma:
-									continue;
-
-								case _:
-									push(tk);
-									break;
-							}
-						}
-						var groupByItems = [for (itm in items) new GroupByItem(convertExprToExpression(itm.e), itm.desc)];
-						queryExpression.from.groupBy = new GroupByClause(groupByItems);
-						trace(queryExpression.from.groupBy);
+						readGroupByClause(queryExpression);
 					}
 					else {
 						break;
@@ -838,7 +828,6 @@ class NewSqlParser {
 
 	function parsePredicate():Predicate {
 		var predicateExpr = parseExpr();
-		trace('$predicateExpr');
 		var predicate = convertExprToPredicate(predicateExpr);
 		while (true) {
 			var tmp = predicate;
@@ -850,7 +839,6 @@ class NewSqlParser {
 
 	function parsePredicateNext(pred: Predicate):Predicate {
 		var tk = token();
-		trace(tk);
 		switch tk {
 			case Op(LogAnd), Kwd('AND'):
 				var pred2 = convertExprToPredicate(parseExpr());
@@ -866,10 +854,17 @@ class NewSqlParser {
 		}
 	}
 
+	var anonParameterLabelCounter:Int = 1;
 	function convertExprToExpression(e:Expr, ?pos:haxe.PosInfos):Expression {
 		switch e {
 			case CTrue, CFalse, CNull:
-				throw SqlError.NotYetImplemented(pos);
+				return switch e {
+					case CTrue: new BoolValue(true);
+					case CFalse: new BoolValue(false);
+					case CNull: new NullValue();
+					default:
+						throw new pm.Error.WTFError();
+				}
 
 			case CInt(i):
 				return new IntValue(i);
@@ -880,11 +875,15 @@ class NewSqlParser {
 			case CString(v):
 				return new StringValue(v);
 
+			case CParam(name):
+				if (name == null) name = '?tmp_${anonParameterLabelCounter++}';
+				return new ParameterExpression(new SqlSymbol(name), parameters.push(name) - 1);
+
 			case EParent(e):
 				return convertExprToExpression(e);
 
 			case EList(arr):
-				throw new pm.Error('$e disallowed', 'InvalidArgument');
+				return new ListExpression([for (e in arr) convertExprToExpression(e)]);
 
 			case EId(id):
 				return new ql.sql.grammar.expression.Expression.ColumnName(symbol(id));
@@ -925,9 +924,9 @@ class NewSqlParser {
 						throw new pm.Error('${this.opStr(op)} operator unhandled');
 				}
 				var left=null, right=null;// = convertExprToExpression(l);
-				// trace(left);
+				// //trace(left);
 				// var right = convertExprToExpression(r);
-				// trace(right);
+				// //trace(right);
 				inline function convertOperands() {
 					left = convertExprToExpression(l);
 					right = convertExprToExpression(r);
@@ -943,7 +942,7 @@ class NewSqlParser {
 						else if (isLogical) (ELogicalOperator : Enum<Dynamic>)
 						else throw new pm.Error.WTFError()
 					), oper.getName());
-					trace('$op', op.typeof()+'');
+					//trace('$op', op.typeof()+'');
 					return new PredicateExpression(convertExprToPredicate(e));
 				}
 				else {
@@ -968,6 +967,8 @@ class NewSqlParser {
 
 	function convertExprToPredicate(e:Expr, ?pos:haxe.PosInfos):Predicate {
 		switch e {
+			case EParent(e):
+				return convertExprToPredicate(e);
 			case EBinop(op, l, r):
 				var comparisonOperator:Null<ComparisonOperator> = null;
 				var logicalOperator:Null<LogicalOperator> = null;
@@ -1003,15 +1004,13 @@ class NewSqlParser {
 					// throw new pm.Error.WTFError();
 					if (op.equals(Binop.In)) {
 						var left = convertExprToExpression(l);
-						var right:PredicateListExpression = new PredicateListExpression(LExpr(new ListExpression(
-							switch r {
-								case EList(exprs)|EParent(EList(exprs)): exprs.map(e -> convertExprToExpression(e));
-								case other: throw new pm.Error('Unexpected $other');
-							}
-						)));
+						var right:PredicateListExpression = new PredicateListExpression(LExpression(convertExprToExpression(r)));
 						return new InPredicate(left, right);
 					}
 				}
+
+			case EUnop(Not, false, e):
+				return new NotPredicate(convertExprToPredicate(e));
 
 			default:
 				throw new pm.Error('Unhandled $e', null, pos);
@@ -1098,14 +1097,18 @@ class NewSqlParser {
 	function parseExpr():Expr {
 		var t = token();
 		switch( t ) {
-            case Ident(_.toUpperCase()=>'NULL'): 
+            case Kwd('NULL'), Ident(_.toUpperCase()=>'NULL'): 
                 return parseExprNext(CNull);
 
-            case Ident(_.toUpperCase()=>'TRUE'): 
+            case Kwd('TRUE'), Ident(_.toUpperCase()=>'TRUE'): 
                 return parseExprNext(CTrue);
 
-            case Ident(_.toUpperCase()=>'FALSE'):
-                return parseExprNext(CFalse);
+            case Kwd('FALSE'), Ident(_.toUpperCase()=>'FALSE'):
+				return parseExprNext(CFalse);
+				
+			case Kwd('NOT'):
+				var e = parseExpr();
+				return parseExprNext(Expr.EUnop(Unop.Not, false, e));
 
             case Ident(id): 
 				return parseExprNext(Expr.EId(id));
@@ -1117,7 +1120,14 @@ class NewSqlParser {
                 return parseExprNext(Expr.CFloat( n ));
 
             case CString(s):
-                return parseExprNext(Expr.CString(s));
+				return parseExprNext(Expr.CString(s));
+				
+			// case QMark:
+			// 	return parseExprNext(Expr.CParam(null));
+
+			case DoubleDot:
+				var name = ident();
+				return parseExprNext(Expr.CParam(name));
 
             case POpen:
                 var el = parseExprList(PClose);
@@ -1157,6 +1167,19 @@ class NewSqlParser {
 	    }
 	    return res;
 	}
+
+	function parseExpression():Expression {
+		return convertExprToExpression(parseExpr());
+	}
+
+	static var global = new NewSqlParser();
+	static inline function p<T>(sql:String, f:NewSqlParser->T):T {
+		var parser = new NewSqlParser();
+		parser._setInput(sql);
+		return f(parser);
+	}
+
+	public static inline function readExpression(sql:String):Expression return p(sql, r -> r.parseExpression());
 }
 
 enum Token {
@@ -1171,8 +1194,14 @@ enum Token {
 	Star;
 	POpen;
 	PClose;
+	BrOpen;//[
+	BrClose;//]
+	CBrOpen;//{
+	CBrClose;//}
+	QMark;// ?
 	Comma;
 	Dot;
+	DoubleDot;// :
 	Not;
 }
 
@@ -1183,3 +1212,21 @@ enum SqlError {
 	NotYetImplemented(?desc:String, pos:haxe.PosInfos);
 }
 
+private class ParserState {
+	public var query:String;
+	public var pos:Int;
+	public var cache: Array<Token>;
+	public var eofStack:Array<Token>;
+	// public var symbolTable:SymbolTable<SqlSymbolType, SqlSymbol>;
+
+	public function new(query, pos, cache, eofStack) {
+		this.query = query;
+		this.pos = pos;
+		this.cache = cache;
+		this.eofStack = eofStack;
+	}
+
+	public static inline function fromParser(p: NewSqlParser) {
+		return @:privateAccess new ParserState(p.query, p.pos, p.cache.copy(), p.eofStack.copy());
+	}
+}

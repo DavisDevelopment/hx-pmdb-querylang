@@ -28,6 +28,7 @@ enum Expr {
 	CInt(i: Int);
 	CFloat(n: Float);
 	CString(v: String);
+	CParam(?parameter: String);
 	
 	EParent(e: Expr);
 	EList(arr: Array<Expr>);
@@ -35,6 +36,7 @@ enum Expr {
 	EField(e:Expr, field:FieldAccess);
 	// EAllFields()
 	EBinop(op:Binop, l:Expr, r:Expr);
+	EUnop(op:Unop, postfix:Bool, e:Expr);
 	ECall(e:Expr, args:Array<Expr>);
 
 	EQuery(q: Query);
@@ -76,17 +78,7 @@ typedef Field = {
 	?all: Bool
 };
 
-enum SqlType {
-	SInt;
-	SFloat;
-	SBigInt;
-	SDouble;
-
-	SText;
-    SBlob;
-	SDate;
-	SDateTime;
-}
+// typedef SqlType = ql.sql.SqlType;
 
 typedef FieldDesc = {
     name: String,
