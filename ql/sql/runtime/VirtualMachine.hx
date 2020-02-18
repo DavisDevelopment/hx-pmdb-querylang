@@ -304,8 +304,8 @@ class Context<TDb, Table, Row> {
 
 		f('int', {
 			'int -> int': (Functions.identity : Function),
-			'float -> int': Std.int,
-			'String -> int': Std.parseInt,
+			'float -> int': (n: Float) -> Std.int(n),
+			'String -> int': s -> Std.parseInt(s),
 			'Bool -> int': (b:Bool)->b?1:0,
 			'Date -> int': (d: Date) -> d.getTime()
 		});

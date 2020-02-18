@@ -5,6 +5,8 @@ import haxe.Constraints.IMap;
 import ql.sql.common.SqlSchema;
 import ql.sql.common.DateTime;
 
+import haxe.rtti.CType;
+
 @:using(ql.sql.runtime.SType.STypes)
 enum SType {
 	TUnknown;
@@ -19,6 +21,33 @@ enum SType {
 }
 
 class STypes {
+	public static function fromCType(type: CType):SType {
+		return switch type {
+			case CUnknown: TUnknown;
+			case CEnum(name, params)|CClass(name, params)|CTypedef(name, params)|CAbstract(name, params):
+				switch name {
+					case 'Bool': TBool;
+					case 'Int': TInt;
+					case 'Float': TFloat;
+					case 'String': TString;
+					case 'Date': TDate;
+					case 'Array': TArray(fromCType(params[0]));
+					case 'Map': TMap(fromCType(params[0]), fromCType(params[1]));
+					case 'Null': fromCType(params[0]);
+					case other:
+						throw new pm.Error('Unhandled $other');
+				}
+
+			case CFunction(args, ret):
+				throw new pm.Error('Unhandled $args->$ret');
+			case CAnonymous(fields):
+				throw new pm.Error('Unhandled {$fields}');
+			case CDynamic(t):
+				throw new pm.Error('Unhandled Dynamic<$t>');
+			case other:
+				throw new pm.Error('Unhandled $other');
+		}
+	}
 	public static function toDataType(type:SType):DataType {
 		return switch type {
 			case TUnknown: DataType.TUnknown;
