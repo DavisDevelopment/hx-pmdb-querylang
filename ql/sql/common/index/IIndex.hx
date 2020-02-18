@@ -2,6 +2,7 @@ package ql.sql.common.index;
 
 import pmdb.core.ds.Itr;
 import ql.sql.runtime.DType;
+import ql.sql.runtime.SType;
 import pmdb.ql.ast.BoundingValue;
 // import pmdb.core.schema.Types.IndexType;
 import pmdb.core.schema.Types.IndexAlgo;
@@ -12,8 +13,8 @@ import pm.Helpers.nor;
 interface IIndex<Key, Item> {
     var sparse(default, null): Bool;
     var unique(default, null): Bool;
-    var keyType(default, null): DType;
-    var itemType(default, null): DType;
+    var keyType(default, null): SType;
+    var itemType(default, null): Null<SqlSchema<Item>>;
     var indexType(default, null): IndexType;
     var options(default, null): IndexOptions<Key, Item>;
 
@@ -54,12 +55,13 @@ enum IndexType {
 
 typedef IndexOptions<Key, Item> = {
     ?type: IndexType,
-    ?fieldName: String,
+    //* ?fieldName: String,
     ?getItemKey: Item -> Key,
-    ?keyType: DType,
-    ?keyComparator: pmdb.core.Comparator<Key>,
-    ?itemEquator: pmdb.core.Equator<Item>,
-    ?keyOrdering: pm.Ord<Key>,
+	?keyType: SType,
+    // ?keyComparator: pmdb.core.Comparator<Key>,
+    // ?itemEq: pmdb.core.Equator<Item>,
+    ?itemEq: (x:Item, y:Item)->Bool,
+    ?keyCmp: pm.Ord<Key>,
     ?unique: Bool,
     ?sparse: Bool
 };

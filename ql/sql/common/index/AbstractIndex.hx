@@ -3,6 +3,7 @@ package ql.sql.common.index;
 import pmdb.core.Arch;
 import pmdb.ql.ts.DataType;
 import ql.sql.runtime.DType;
+import ql.sql.runtime.SType;
 import pmdb.ql.ast.BoundingValue;
 // import pmdb.core.schema.Types;
 import ql.sql.common.index.IIndex;
@@ -14,18 +15,19 @@ class AbstractIndex<Key, Item> implements IIndex<Key, Item> {
         this.options = Arch.clone(o, Shallow);
         this.sparse = false;
         this.unique = false;
-        this.keyType = DType.TUnknown;
-        this.itemType = DType.TUnknown;
+        this.keyType = SType.TUnknown;
+        this.itemType = null;
     }
 
 /* === Fields === */
 
+    public var indexType(default, null):IndexType;
 	public var sparse(default, null):Bool;
 	public var unique(default, null):Bool;
-	public var keyType(default, null):DType;
-	public var itemType(default, null):DType;
-	public var indexType(default, null):IndexType;
-	public var options(default, null):IndexOptions<Key, Item>;
+	public var keyType(default, null):SType;
+	public var itemType(default, null):Null<SqlSchema<Item>>;
+    
+    public var options(default, null):IndexOptions<Key, Item>;
 
 /* === Methods === */
 

@@ -12,6 +12,7 @@ import pmdb.core.ds.AVLTree;
 import pmdb.core.ds.Itr;
 import pmdb.core.StructSchema;
 import pm.Error;
+import pmdb.core.Arch;
 
 import ql.sql.common.index.IIndex;
 import ql.sql.common.SqlSchema;
@@ -28,6 +29,9 @@ using pm.Functions;
 class AVLIndex<Key, Item> extends AbstractIndex<Key, Item> {
     public var keyComparator: Comparator<Key>;
     public var itemEquator: Equator<Item>;
+
+    var keyCmp: pm.Ord<Key>;
+    var itemEq: Item -> Item -> Bool;
     
     public var schema:Null<SqlSchema<Item>> = null;
 
@@ -41,18 +45,17 @@ class AVLIndex<Key, Item> extends AbstractIndex<Key, Item> {
         this.unique = nor(o.unique, this.unique);
         this.indexType = switch o {
             case {type:IndexType.Simple(path)}: Simple(path);
-            case {fieldName: fieldName} if (!fieldName.empty()): Simple(fieldName);
+            // case {fieldName: fieldName} if (!fieldName.empty()): Simple(fieldName);
             case {type: other}: other;
         };
-        this.itemEquator = switch options.itemEquator {
-            case null: Equator.anyEq();
-            case eq: eq;
-        }
-        if (nn(options.keyOrdering)) {
-            this._compareKeys = (a:Key, b:Key) -> options.keyOrdering.intComparison(a, b);
+        this.itemEquator = Equator.anyEq();
+        this.itemEq = (a, b) -> itemEquator.equals(a, b);
+        if (nn(options.keyCmp)) {
+            this.keyCmp = options.keyCmp;//(a:Key, b:Key) -> options.keyOrdering.intComparison(a, b);
         }
         else {
-            this.keyComparator = options.keyComparator;
+            // this.keyComparator = options.keyComparator;
+            this.keyCmp = pm.Ord.fromIntComparison((a:Key, b:Key)->Arch.compareThings(a, b));
         }
 
         this.tree = new AVLTree({
@@ -109,7 +112,7 @@ class AVLIndex<Key, Item> extends AbstractIndex<Key, Item> {
     }
 
     private inline function missingKey(item: Item):IndexError<Key, Item> {
-		var field:String = if (options.fieldName != null) options.fieldName else switch indexType {
+		var field:String = switch indexType {
 			case Simple(path): path;
 			case Expression(e): e.print();
 		};
