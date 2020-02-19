@@ -242,6 +242,7 @@ class Compiler {
 
     function compileSelOutput(exporter: SelOutput) {
         var items = exporter.items.map(item -> compileSelItem(item)).toArray();
+        items.reverse();
         var schema = compileSelOutSchema(exporter);
 
         var f = function(g) {
@@ -304,8 +305,18 @@ class Compiler {
             var p = cast(predicate, AndPredicate);
             var left = compileSelectPredicate(p.left);
             var right = compileSelectPredicate(p.right);
-            var res = new SelPredicate(SelPredicateType.And(left, right));
-            res.mCompiled = g -> (left.eval(g) && right.eval(g));
+            var res = SelPredicate.And(left, right);
+            // res.mCompiled = g -> (left.eval(g) && right.eval(g));
+			switch res.type {
+				case And(subs):
+					res.mCompiled = function(g) {
+						for (predicate in subs)
+							if (!predicate.eval(g))
+								return false;
+						return true;
+					};
+				default:
+			}
             return res;
         }
 
@@ -313,8 +324,17 @@ class Compiler {
 			var p = cast(predicate, OrPredicate);
 			var left = compileSelectPredicate(p.left);
 			var right = compileSelectPredicate(p.right);
-			var res = new SelPredicate(SelPredicateType.Or(left, right));
-            res.mCompiled = g -> (left.eval(g) || right.eval(g));
+            var res = SelPredicate.Or(left, right);
+            switch res.type {
+                case Or(subs):
+                    res.mCompiled = function(g) {
+                        for (predicate in subs)
+                            if (predicate.eval(g))
+                                return true;
+                        return false;
+                    };
+                default:
+            }
 			return res;
 		}
         
@@ -499,8 +519,20 @@ class Compiler {
                };
 
             case TArrayDecl(values):
+                var allConst = true;
+                for (value in values) {
+                    compileExpression2(value);
+                    if (allConst && value.mConstant == null)
+                        allConst = false;
+                }
+
+                var constValues = allConst ? [for (v in values) v.mConstant] : null;
+                
                 function(g):Dynamic {
-                    throw new pm.Error.NotImplementedError();
+                    if (allConst)
+                        return constValues;
+                    else
+                        return [for (v in values) v.eval(g)];
                 };
 
             case TObjectDecl(fields):
@@ -571,6 +603,7 @@ class Compiler {
     }
 
     function typeExpr(e: TExpr) {
+        // if (e.is)
         switch e.expr {
             case TBinop(op, left, right):
                 typeExpr(left);
@@ -613,6 +646,76 @@ class Compiler {
             case TConst(_):
             case TArrayDecl(_):
             case TObjectDecl(_):
+        }
+    }
+
+    function typeSelPredicate(p: SelPredicate) {
+        switch p.type {
+            case Rel(relation):
+                typeExpr(relation.left);
+                typeExpr(relation.right);
+                final l = relation.left;
+                final r = relation.right;
+
+                inline function compOp(opStr: String) {
+                    switch [l.type, r.type] {
+                        case [TUnknown, TUnknown]:
+                            //
+
+                        case [TUnknown, def], [def, TUnknown]:
+                            l.type = r.type = def;
+
+                        case [ltype, rtype]:
+                            if (!ltype.eq(rtype)) {
+                                throw new pm.Error('Invalid operation $ltype $opStr $rtype');
+                            }
+                    }
+                }
+
+                switch relation.op {
+                    case Equals:
+                        compOp('=');
+                    case NotEquals:
+                        compOp('!=');
+                    case Greater:
+                        compOp('>');
+                    case Lesser:
+                        compOp('<');
+                    case GreaterEq:
+                        compOp('>=');
+                    case LesserEq:
+                        compOp('<=');
+                    case In:
+                        switch r.type {
+                            case TString:
+                                switch l.type {
+                                    case TString:
+                                    case other:
+                                        throw new pm.Error('Invalid operation ${l.type.print()} in String');
+                                }
+
+                            case TArray(itemType):
+                                switch l.type {
+                                    case _.eq(itemType)=>true:
+                                    case TArray(_.eq(itemType)=>true):
+                                    case TUnknown:
+                                        l.type = itemType;
+                                    case other:
+                                        throw new pm.Error('Invalid operation ${l.type.print()} in Array<String>');
+                                }
+
+                            case other:
+								throw new pm.Error('Invalid operation ${l.type.print()} in ${other.print()}');
+                        }
+                }
+
+            case And(p):
+                for (x in p)
+                    typeSelPredicate(x);
+
+            case Or(p):
+                for (x in p)
+                    typeSelPredicate(x);
         }
     }
 

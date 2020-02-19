@@ -1,7 +1,6 @@
 package ql.sql.common;
 
 import ql.sql.runtime.TAst.JITFn;
-import haxe.ds.Either;
 import ql.sql.runtime.TAst.TExpr;
 import pmdb.core.ds.Incrementer;
 import pm.map.Dictionary;
@@ -13,25 +12,31 @@ import pm.HashKey;
 import pm.ImmutableList;
 import pm.ImmutableList.ListRepr as Cell;
 
-import haxe.ds.ReadOnlyArray;
-import haxe.ds.Option;
 using pm.Options;
 using pm.Outcome;
-import haxe.extern.EitherType as Or;
 
 import ql.sql.runtime.SType;
 import ql.sql.runtime.DType;
 import ql.sql.runtime.VirtualMachine.Context;
 
+import haxe.rtti.Rtti;
+import haxe.rtti.Meta;
+import haxe.rtti.CType.Classdef;
+import haxe.ds.Either;
+import haxe.ds.Option;
+import haxe.ds.ReadOnlyArray;
+import haxe.extern.EitherType as Or;
+
 import pm.Helpers.nor;
 
 using Lambda;
 using pm.Arrays;
+using ql.sql.runtime.SType;
 
 class SqlSchema<Row> {
     public final mode: SchemaMode;
     public final fields: SchemaFields;
-    public final indexes: ReadOnlyArray<Dynamic>;
+    public final indexes: ReadOnlyArray<SchemaIndex>;
 
     public final primaryKey: Null<SchemaField>;
     public final incrementers: Null<Dictionary<Incrementer>>;
@@ -161,9 +166,18 @@ class SqlSchema<Row> {
     }
 
     public function induct(o: Dynamic):Row {
-        return inductObject(o);
+        #if !debug
+        if (_compiledInductObject == null) {
+            _compiledInductObject = cast objectImporter();
+        }
+        return _compiledInductObject(o);
+        #end
+
+        var obj:Object<Dynamic> = Object.unsafe(o);
+        return inductObject(obj);
     }
 
+    var _compiledInductObject:Null<Dynamic->Row> = null;
     /**
      * convert from a Haxe object into a PmDbDocument
      * @param o 
@@ -171,7 +185,7 @@ class SqlSchema<Row> {
      */
     public function inductObject(o: Doc):Row {
         var row:Doc = new Doc();
-		final doc:Doc = o;
+		final doc:Doc = Doc.unsafe(o);
 		// var errors:Array<Error> = [];
         var rowFields = new set.StringSet(doc.keys());
         
@@ -196,7 +210,11 @@ class SqlSchema<Row> {
 
 				if (value == null && (field.notNull)) {
 					handleNull(field);
-				}
+                }
+                else if (value == null) {
+                    row[name] = null;
+                    continue;
+                }
 
                 row[name] = field.type.importValue(value);
             } 
@@ -212,8 +230,65 @@ class SqlSchema<Row> {
         // var extraFields:Null<Doc> = rowFields.length == 0 ? null : o.pick(rowFields.toArray());
         // if (extraFields != null) trace('Extra: ', extraFields);
         
-        return cast row;
+        return convertDocToRow(row);
     }
+
+    // function objectImporter():Doc -> Doc {
+    //     var fieldNames = fields.map(f -> f.name);
+    //     var picker = (o: Doc) -> inline o.pick(fieldNames);
+    //     var field_fns = fields.fields.map(f -> objectImporterFieldFn(f));
+
+    //     var imp:Doc->Doc = function(o: Doc):Doc {
+    //         var row:Doc = picker(o);
+
+    //         for (f in field_fns)
+    //             f(o, row);
+			
+    //         return row;
+    //     }
+
+    //     return imp;
+    // }
+    // function objectImporterFieldFn(field: SchemaField) {
+    //     final f = field;
+    //     final name = field.name;
+
+	// 	inline function handleNull(field:SchemaField, row:Doc) {
+	// 		final name = field.name;
+	// 		if (field.autoIncrement && this.incrementers.exists(name)) {
+	// 			row[name] = incrementers[name].next();
+    //         } 
+    //         else if (field.defaultValueExpr != null) {
+	// 			row[name] = field.type.importValue(field.defaultValueExpr.eval(this));
+    //         } 
+    //         else {
+	// 			throw(new Error('Field `${field.name}` missing from structure'));
+    //         }
+    //     }
+        
+    //     function handleField(input:Doc, output:Doc) {
+	// 		if (input.exists(name)) {
+	// 			var value:Dynamic = input[name];
+	// 			if (value == null && f.notNull) {
+	// 				handleNull(f, output);
+    //             } 
+    //             else if (value == null) {
+	// 				output[name] = null;
+	// 				return ;
+	// 			}
+
+	// 			output[name] = f.type.importValue(value);
+    //         } 
+    //         else if (f.notNull) {
+	// 			handleNull(f, output);
+    //         } 
+    //         else {
+	// 			output[name] = null;
+	// 		}
+    //     }
+
+    //     return handleField;
+    // }
 
     /**
      * checks the validity of the given object as the 'constructor' argument
@@ -367,6 +442,68 @@ class SqlSchema<Row> {
             });
         }
     }
+
+    public static function fromClass<T>(type: Class<T>):SqlSchema<T> {
+        if (!Rtti.hasRtti(type)) throw new pm.Error('Class must be flagged with the @:rtti metadata');
+        var rtti = haxe.rtti.Rtti.getRtti(type);
+
+        var init:SchemaInit = {
+            fields: new Array()
+        };
+        parseRtti(rtti, init);
+
+        return new SqlSchema(init);
+    }
+
+    static function parseRtti(info:Classdef, init:SchemaInit) {
+        for (field in info.fields) {
+            if (!field.meta.search(e -> e.name == 'exclude')) {
+                var column:SchemaFieldInit = {
+                    name: field.name,
+                    type: TUnknown,
+                    notNull: false,
+                    unique: false,
+                    primaryKey: false,
+                    autoIncrement: false
+                };
+
+                var exclude:Bool = false;
+                var typeHandled = false;
+
+                switch field.type {
+                    case CFunction(_, _):
+                        continue;
+
+                    case CTypedef('Null', [t]):
+                        column.type = STypes.fromCType(t);
+                        typeHandled = true;
+
+                    default: 
+                }
+
+                for (entry in field.meta) {
+                    switch entry.name {
+                        case 'notNull', 'sql.notNull':
+                            column.notNull = true;
+
+                        case 'primary', 'sql.primary', 'id', 'sql.id':
+                            column.primaryKey = true;
+
+                        case 'unique', 'sql.unique':
+                            column.unique = true;
+
+                        default:
+                    }
+                }
+
+                if (!typeHandled)
+                    column.type = STypes.fromCType(field.type);
+
+                if (!exclude) 
+                    (cast init.fields : Array<SchemaFieldInit>).push(column);
+            }
+        }
+    }
 }
 
 class SchemaFields {
@@ -410,7 +547,8 @@ typedef SchemaInit = {
     ?mode: Or<SchemaMode, String>,
     ?incrementers: Map<String, Int>,
     ?context: Context<Dynamic, Dynamic, Dynamic>,
-    fields: Or<Array<SchemaFieldInit>, SchemaInitFieldMap>
+    fields: Or<Array<SchemaFieldInit>, SchemaInitFieldMap>,
+    ?indexes: Array<SchemaIndexInit>
 };
 typedef SchemaInitFieldMap = Dynamic<SchemaFieldInit>;
 
@@ -424,26 +562,19 @@ typedef SchemaFieldInit = {
     ?defaultValue: Or<String, TExpr>
 };
 
-#if corn.foo
-typedef SchemaField = {
-    final name: String;
-    final type: SType;
-
-    final primaryKey: Bool;
-    final unique: Bool;
-    final notNull: Bool;
-    final autoIncrement: Bool;
+typedef SchemaIndexInit = {
+    ?path: String,
+    ?type: SType,
+    ?sparse: Bool,
+    ?unique: Bool,
+    ?overrideAlgorithm: SchemaIndexAlgorithm
 };
-#else
-// @:structInit
-// class BaseSchemaField {
-    // public final name: String;
-    // public final type: SType;
-    // public final primaryKey: Bool;
-    // public final unique: Bool;
-    // public final notNull: Bool;
-    // public final autoIncrement: Bool;
-// }
+
+enum SchemaIndexAlgorithm {
+    AlgMap;
+    AlgAvl;
+}
+
 typedef SchemaFieldState = {
     final name: String;
     final type: SType;
@@ -560,7 +691,22 @@ class Constructor {
         fields = [];
     }
 }
-#end
+
+class SchemaIndex {
+    public var pathName: String;
+    // public final path: ql.sql.common.DotPath;
+    public var keyType: SType;
+    public var sparse: Bool;
+    public var unique: Bool;
+
+    public function new(init: SchemaIndexInit) {
+        this.pathName = init.path;
+        this.keyType = init.type.nor(TUnknown);
+        this.sparse = init.sparse.nor(false);
+        this.unique = init.unique.nor(false);
+        // this.path = this.pathName;
+    }
+}
 
 enum SchemaMode {
     RowMode;

@@ -13,14 +13,28 @@ class SelectImpl {
     public var _stmt: Null<SelectStatement> = null;
     public var _predicate:Null<SelPredicate> = null;
     public var _exporter:Null<Exporter<Doc>> = null;
+    public var _traverser:Null<Traverser> = null;
 
     public function new(?stmt:SelectStatement, ?p:SelPredicate, ?e:SelOutput) {
         if (stmt != null) _stmt = stmt;
         if (p != null) _predicate = p;
         if (e != null) _exporter = e;
+        _traverser = new Traverser();
+        _traverser.iter = function(sel, source, f) {
+            sel.context.glue.tblGetAllRows(source).iter(f);
+        };
     }
 
-    public function apply(acc:Array<Dynamic>, row:Dynamic, sel:Sel<Dynamic, Dynamic, Dynamic>) {
+    public function apply(sel:Sel<Dynamic, Dynamic, Dynamic>) {
+        var c = sel.context;
+        var acc:Array<Dynamic> = [];
+        _traverser.iter(sel, sel.source, function(row: Dynamic) {
+            _apply(acc, row, sel);
+        });
+        return acc;
+    }
+
+    function _apply(acc:Array<Dynamic>, row:Dynamic, sel:Sel<Dynamic, Dynamic, Dynamic>) {
         var c = sel.context;
         var map = _exporter != null ? _exporter.mCompiled : null;
         switch [_predicate, map] {
@@ -43,6 +57,13 @@ class SelectImpl {
                     acc.push(map(cast sel));
                 }
         }
+    }
+}
+
+class Traverser {
+    public var iter: Null<(sel:Sel<Dynamic, Dynamic, Dynamic>, source:Dynamic, fn:Dynamic->Void)->Void> = null;
+    public function new() {
+        //
     }
 }
 
@@ -70,14 +91,7 @@ class Sel<Table, Row, ResultRow> {
     }
 
     public function eval():Array<ResultRow> {
-        var input = this.context.glue.tblGetAllRows(this.source);
-        var output = new Array();
-
-        for (row in input) {
-            this.i.apply(output, row, this);
-        }
-
-        return output;
+        return cast i.apply(this);
     }
 }
 

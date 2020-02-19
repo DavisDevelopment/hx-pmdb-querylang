@@ -126,9 +126,8 @@ class CTypedValue {
             Failure(new pm.Error('Expected ${this.type}, got ${this.value}', 'TypeMismatchError'));
     }
 
-    @:pure
-    extern public inline function isOfType(t:SType):Bool {
-        return this.type.eq(t);
+    public function isOfType(t:SType):Bool {
+        return this.type.eq(t) || t.validateValue(this.value);
     }
 }
 
@@ -371,49 +370,72 @@ enum RelationPredicateOperator {
 // typedef Document = Object<Variant>;
 
 class Operators {
-	public static function getMethodHandle(op:RelationPredicateOperator):(Dynamic, Dynamic) -> Bool {
-		return switch op {
-			case Equals: op_eq;
-			case NotEquals: op_neq;
-			case Greater: op_gt;
-			case Lesser: op_lt;
-			case GreaterEq: op_gte;
-			case LesserEq: op_lte;
-			case In: op_in;
+	public static function getMethodHandle(op:RelationPredicateOperator, leftType:SType=TUnknown, rightType:SType=TUnknown):(Dynamic, Dynamic) -> Bool {
+		switch [op, leftType, rightType] {
+			case [In, t1, TArray(t2)] if (t1.eq(t2)): 
+				return function(l:Dynamic, r:Array<Dynamic>):Bool {
+					return r.search(x -> x == l);
+				}
+			case [In, TString, TString]:
+				return (l:String, r:String) -> r.has(l);
+			case [_, TBool | TInt | TFloat | TString, _] | [_, _, TBool | TInt | TFloat | TString]:
+				return switch op {
+					case Equals: (l, r) -> try l == r catch (e: Dynamic) false;
+					case NotEquals: (l, r) -> try l != r catch (e:Dynamic) true;
+					case Greater: utop_gt;
+					case Lesser: utop_lt;
+					case GreaterEq: utop_gte;
+					case LesserEq: utop_lte;
+					case In:
+						throw new pm.Error('Unreachable');
+				}
+
+			default:
+				return switch op {
+					case Equals: utop_eq;
+					case NotEquals: utop_neq;
+					case Greater: utop_gt;
+					case Lesser: utop_lt;
+					case GreaterEq: utop_gte;
+					case LesserEq: utop_lte;
+					case In: utop_in;
+				}
 		}
+
+		throw new pm.Error('Unhandled $op, $leftType, $rightType');
 	}
 
-	static function op_eq(l:Dynamic, r:Dynamic):Bool {
+	static function utop_eq(l:Dynamic, r:Dynamic):Bool {
 		return Arch.areThingsEqual(l, r);
 	}
 
-	static function op_neq(l:Dynamic, r:Dynamic):Bool {
-		return !op_eq(l, r);
+	static function utop_neq(l:Dynamic, r:Dynamic):Bool {
+		return !utop_eq(l, r);
 	}
 
 	static function cmp(l:Dynamic, r:Dynamic):Int {
 		return Arch.compareThings(l, r);
 	}
 
-	static function op_gt(l:Dynamic, r:Dynamic):Bool {
+	static function utop_gt(l:Dynamic, r:Dynamic):Bool {
 		// throw new pm.Error.NotImplementedError();
 		return cmp(l, r) > 0;
 	}
 
-	static function op_gte(l:Dynamic, r:Dynamic):Bool {
+	static function utop_gte(l:Dynamic, r:Dynamic):Bool {
 		return cmp(l, r) >= 0;
 	}
 
-	static function op_lt(l:Dynamic, r:Dynamic):Bool {
+	static function utop_lt(l:Dynamic, r:Dynamic):Bool {
 		return cmp(l, r) < 0;
 	}
 
-	static function op_lte(l:Dynamic, r:Dynamic):Bool {
+	static function utop_lte(l:Dynamic, r:Dynamic):Bool {
 		// throw new pm.Error.NotImplementedError();
 		return cmp(l, r) <= 0;
 	}
 
-	static function op_in(l:TypedValue, r:TypedValue):Bool {
+	static function utop_in_(l:TypedValue, r:TypedValue):Bool {
 		// trace(l, r);
 		// throw new pm.Error.NotImplementedError();
 		switch r.type {
@@ -429,10 +451,35 @@ class Operators {
 				return r.stringValue.has(l.stringValue);
 
 			default:
-				throw new pm.Error('Invalid operand types');
+				throw new pm.Error('Invalid operation ${l.type.print()} in ${r.type.print()}');
 		}
 
 		return false;
+	}
+
+	static function utop_in(left:Dynamic, right:Dynamic):Bool {
+		if (right == null) return false;
+		if (TypedValue.is(left))
+			left = (left : TypedValue).value;
+		if (TypedValue.is(right))
+			right = (right : TypedValue).value;
+
+		if ((right is String)) {
+			return (right : String).has(Std.string(left));
+		}
+
+		if ((right is Array<Dynamic>)) {
+			var a:Array<Dynamic> = cast right;
+			if (a.length == 0) return false;
+			if (a.has(left)) return true;
+			for (item in a) {
+				if (left == item) return true;
+				if (utop_eq(left, item)) return true;
+			}
+			return false;
+		}
+
+		throw new pm.Error('Invalid operation ${Type.typeof(left)} in ${Type.typeof(right)}');
 	}
 }
 

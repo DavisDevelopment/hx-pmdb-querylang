@@ -1,5 +1,6 @@
 package ql.sql.runtime;
 
+import haxe.extern.EitherType;
 import ql.sql.runtime.VirtualMachine.F;
 import haxe.macro.Expr as HaxeExpr;
 import haxe.macro.Expr.ExprOf as HaxeExprOf;
@@ -125,12 +126,51 @@ class SelPredicate {
         }
         return mCompiled(g);
     }
+
+	public function bindParameters(params:EitherType<Array<Dynamic>, Map<String, Dynamic>>) {
+        var t = SelPredicateType;
+        switch type {
+            case t.Rel(relation):
+                relation.bindParameters(params);
+            case t.And(p):
+                for (x in p)
+                    x.bindParameters(params);
+            case t.Or(p):
+                for (x in p)
+                    x.bindParameters(params);
+        }
+    }
+
+    public static function And(l:SelPredicate, r:SelPredicate):SelPredicate {
+        var t = SelPredicateType;
+        var type = switch l.type {
+            case t.And(larr): switch r.type {
+                case t.And(rarr): t.And(larr.concat(rarr));
+                default: t.And(larr.concat([r]));
+            }
+            default: t.And([l, r]);
+        }
+        return new SelPredicate(type);
+    }
+	public static function Or(l:SelPredicate, r:SelPredicate):SelPredicate {
+		var t = SelPredicateType;
+		var type = switch l.type {
+			case t.Or(larr): switch r.type {
+					case t.Or(rarr): t.Or(larr.concat(rarr));
+					default: t.Or(larr.concat([r]));
+				}
+			default: t.Or([l, r]);
+		}
+		return new SelPredicate(type);
+	}
 }
 
 enum SelPredicateType {
     Rel(relation: RelationalPredicate);
-    And(left:SelPredicate, right:SelPredicate);
-    Or(left:SelPredicate, right:SelPredicate);
+    // And(left:SelPredicate, right:SelPredicate);
+    // Or(left:SelPredicate, right:SelPredicate);
+    And(p: Array<SelPredicate>);
+    Or(p: Array<SelPredicate>);
 }
 
 typedef IRNode<F:haxe.Constraints.Function> = {
@@ -167,18 +207,28 @@ class RelationalPredicate extends ARel<TExpr, TExpr> {
     public function new(op, l, r) {
         super(op, l, r);
 
-        this.mOpCompiled = this.op.getMethodHandle();
+        this.mOpCompiled = this.op.getMethodHandle(left.type, right.type);
     }
 
     public function eval(g:{context:Context<Dynamic, Dynamic, Dynamic>}):Bool {
         if (this.mOpCompiled == null) {
-            throw new pm.Error('Missing operator method!');
+            this.mOpCompiled = this.op.getMethodHandle(left.type, right.type);
         }
 
+        #if pmdb.use_typedvalue
         var l:TypedValue = left.eval(g);
         var r:TypedValue = right.eval(g);
+        #else
+        var l = left.eval(g);
+        var r = right.eval(g);
+        #end
 
         return mOpCompiled(l, r);
+    }
+
+	public function bindParameters(params:EitherType<Array<Dynamic>, Map<String, Dynamic>>) {
+        left.bindParameters(params);
+        right.bindParameters(params);
     }
 }
 
@@ -191,6 +241,8 @@ class TExpr {
     public final expr: TExprType;
     public var type:SType;
 
+    private var _meta:Doc;
+
     public function new(e:TExprType) {
         this.expr = e;
         this.type = TUnknown;
@@ -202,6 +254,7 @@ class TExpr {
 
             default:
         }
+        this._meta = {};
     }
 
     public function isTyped():Bool {
@@ -220,6 +273,104 @@ class TExpr {
 
     public inline function print():String {
         return expr.print();
+    }
+
+    public function bindParameter(name:EitherType<Int, String>, value:Dynamic):TExpr {
+        switch this.expr {
+            case TParam({label:_.identifier=>label, offset:offset}):
+                if ((name is String) && label == name) {
+                    this.mConstant = value;
+                }
+                else if ((name is Int) && offset == name) {
+                    this.mConstant = value;
+                }
+
+            case TField(o, _):
+                o.bindParameter(name, value);
+
+            case TCall(f, params):
+                f.bindParameter(name, value);
+                for (p in params)
+                    p.bindParameter(name, value);
+
+            case TBinop(_, l, r):
+                l.bindParameter(name, value);
+                r.bindParameter(name, value);
+
+            case TUnop(_, _, e):
+                e.bindParameter(name, value);
+
+            case TArrayDecl(values):
+                for (v in values)
+                    v.bindParameter(name, value);
+
+            case _:
+        }
+
+        return this;
+    }
+
+	public function bindParameters(params:EitherType<Array<Dynamic>, Map<String, Dynamic>>, raw=false):TExpr {
+        var mapping:Array<{key:Dynamic, value:Dynamic}> = new Array();
+        if (raw) {
+            mapping = cast params;
+        }
+        else {
+            if ((params is Array<Dynamic>)) {
+                var arr = (cast params : Array<Dynamic>);
+                for (k in 0...arr.length) {
+                    mapping.push({key:k, value:arr[k]});
+                }
+            }
+            else if ((params is IMap<Dynamic, Dynamic>)) {
+                var m = (cast params : IMap<Dynamic, Dynamic>);
+                for (pair in m.keyValueIterator()) {
+                    mapping.push(pair);
+                }
+            }
+            else {
+                throw new pm.Error('Unhandled ${Type.typeof(params)}');
+            }
+        }
+
+		switch this.expr {
+			case TParam({label: _.identifier => label, offset: offset}):
+				for (pair in mapping) {
+                    bindParameterOnto(label, offset, pair.key, pair.value);
+                }
+
+			case TField(o, _):
+				o.bindParameters(mapping, true);
+
+			case TCall(f, params):
+				f.bindParameters(mapping, true);
+				for (p in params)
+					p.bindParameters(mapping, true);
+
+			case TBinop(_, l, r):
+				l.bindParameters(mapping, true);
+				r.bindParameters(mapping, true);
+
+			case TUnop(_, _, e):
+				e.bindParameters(mapping, true);
+
+			case TArrayDecl(values):
+				for (v in values)
+					v.bindParameters(mapping, true);
+
+			case _:
+		}
+
+		return this;
+	}
+
+	function bindParameterOnto(label:String, offset:Int, key:EitherType<Int, String>, value:Dynamic) {
+		if ((key is String) && label == key) {
+			this.mConstant = value;
+        } 
+        else if ((key is Int) && offset == key) {
+			this.mConstant = value;
+		}
     }
 }
 
