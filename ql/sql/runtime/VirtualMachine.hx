@@ -301,6 +301,9 @@ class Context<TDb, Table, Row> {
 		inline function f(name, o) {
 			scope.define(name, F.declare(o));
 		}
+		inline function nf(name, fn:Function) {
+			scope.define(name, F.native(fn));
+		}
 
 		f('int', {
 			'int -> int': (Functions.identity : Function),
@@ -312,7 +315,11 @@ class Context<TDb, Table, Row> {
 
 
 		f('str', {'Any -> String': Std.string});
-		
+		nf('regexp', function(pattern:String, flags:String) {
+			return new EReg(pattern, flags);
+		});
+		nf('strlower', (s:String)->s.toLowerCase());
+		nf('strupper', (s:String)->s.toUpperCase());
 
 		f('min', {
 			'int, int -> int': ((x:Int, y:Int) -> pm.Numbers.Ints.min(x, y) : Function),

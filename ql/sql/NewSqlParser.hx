@@ -2,7 +2,7 @@ package ql.sql;
 
 import haxe.ds.GenericStack;
 import ql.sql.Query;
-
+import ql.sql.TsAst;
 import ql.sql.grammar.CommonTypes;
 import ql.sql.grammar.expression.Expression;
 import ql.sql.TsAst;
