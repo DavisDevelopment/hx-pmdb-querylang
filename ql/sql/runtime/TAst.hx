@@ -377,6 +377,10 @@ class TExpr {
 @:using(ql.sql.runtime.TAst.TExprTypeTools)
 enum TExprType {
     TConst(value: TypedValue);
+    /**
+     * a reference to some named value, to be transformed into a typed reference later
+     */
+    TReference(name: Sym);
     
     /**
      * a parameter expression, i.e. `?`, `:param_name`, and with our syntax extensions, also `${param_name}`
