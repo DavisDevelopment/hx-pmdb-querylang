@@ -29,9 +29,15 @@ import haxe.extern.EitherType as Or;
 
 import pm.Helpers.nor;
 
+import haxe.macro.Expr;
+
+import pm.Error;
+
 using Lambda;
 using pm.Arrays;
 using ql.sql.runtime.SType;
+
+using haxe.macro.ExprTools;
 
 class SqlSchema<Row> {
     public final mode: SchemaMode;
@@ -492,6 +498,9 @@ class SqlSchema<Row> {
                         case 'unique', 'sql.unique':
                             column.unique = true;
 
+                        case 'default', 'defaultTo', 'sql.default', 'sql.defaultTo':
+                            column.defaultValue = entry.params[0];
+
                         default:
                     }
                 }
@@ -502,6 +511,114 @@ class SqlSchema<Row> {
                 if (!exclude) 
                     (cast init.fields : Array<SchemaFieldInit>).push(column);
             }
+        }
+    }
+
+    public static function fromHaxeMacroFieldArray(fields: Array<Field>):SqlSchema<Dynamic> {
+        var init:SchemaInit = {
+            fields: new Array()
+        };
+        addHaxeMacroFieldArray(init, fields);
+        return new SqlSchema(init);
+    }
+
+    static function addHaxeMacroFieldArray(schema:SchemaInit, fields:Array<Field>) {
+        for (f in fields)
+            addHaxeMacroField(schema, f);
+    }
+
+	private static function addHaxeMacroField(schema:SchemaInit, f:haxe.macro.Expr.Field) {
+		var column:SchemaFieldInit = {
+			name: f.name,
+			type: TUnknown,
+			notNull: false,
+			unique: false,
+			primaryKey: false,
+			autoIncrement: false
+		};
+        // var flags:Array<FieldFlag> = new Array();
+		// var type:ValType = DataType.TAny;
+        var idx = false;
+        var exclude = if (f.meta == null) false else f.meta.search(e -> ['exclude','ignore'].has(e.name));
+        if (exclude) return ;
+        //
+        // f.eatAss;
+
+		if (f.meta != null) {
+			for (m in f.meta) {
+				switch m.name.toLowerCase() {
+					case ':notnull', 'notnull':
+                        column.notNull = true;
+
+					case ':primary', 'primary':
+                        // flags.push(FieldFlag.Primary);
+                        column.primaryKey = true;
+
+					case ':unique', 'unique':
+                        // flags.push(FieldFlag.Unique);
+                        column.unique = true;
+
+					case ':autoincrement', 'autoincrement':
+                        // flags.push(FieldFlag.AutoIncrement);
+                        column.autoIncrement = true;
+
+                    case ':defaultto' | 'defaultto' | 'default' | ':default':
+						column.defaultValue = switch m.params[0] {
+                            case {expr:EConst(CString(codeForValue))}: codeForValue;
+                            case other:
+                                throw other;
+                        }
+
+					case ':index', 'index':
+						idx = true;
+				}
+			}
+		}
+
+		switch f.kind {
+			case FieldType.FVar(null, _):
+				column.type = SType.TUnknown;
+
+			case FieldType.FVar(t, _):
+                
+				// switch t {
+				// 	// case null: false;
+				// 	case TParent(t): false;
+				// 	case TOptional(t): false;
+				// 	case TNamed(n, t): false;
+				// 	case TExtend(p, fields): false;
+				// 	case TPath(p): false;
+
+				// 	case TFunction(args, ret): false;
+				// 	case TAnonymous(fields): false;
+				// 	case TIntersection(types):
+				// 		throw new pm.Error.NotImplementedError('intersection (A & B) types not implemented yet');
+				// }
+				column.type = STypes.ofComplexType(t);
+
+			default:
+				throw new pm.Error('Wut ${f.kind}');
+		}
+
+		//
+        
+		if (idx) {
+            // schema.indexes.push({name: f.name});
+            Console.error('Indexing needs implementing!');
+        }
+
+        (cast schema.fields : Array<SchemaFieldInit>).push(column);
+    }
+    
+    public static function fromComplexType(ctype: ComplexType):SqlSchema<Dynamic> {
+		return switch ctype {
+			case ComplexType.TAnonymous(fields): SqlSchema.fromHaxeMacroFieldArray(fields);
+			case ComplexType.TParent(ctype), ComplexType.TNamed(_, ctype): fromComplexType(ctype);
+            case ComplexType.TOptional(ctype): fromComplexType(ctype);
+            case ComplexType.TIntersection(ctypes):
+                throw new pm.Error('TODO');
+            case other:
+                throw new pm.Error('Unhandled type ${haxe.macro.ComplexTypeTools.toString(other)}');
         }
     }
 }
@@ -586,7 +703,6 @@ typedef SchemaFieldState = {
 };
 
 // @:structInit
-@:tink
 class SchemaField {
     public final name: String;
     public final type: SType;
