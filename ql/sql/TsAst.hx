@@ -106,6 +106,9 @@ abstract SqlStatement (ESqlStatement) from ESqlStatement to ESqlStatement {
             default: throw new pm.Error('Disallowed');
         }
     }
+
+    public var data(get, never):ESqlStatement;
+    private inline function get_data() return this;
 }
 enum ESqlStatement {
     DmlStatement(stmt: DmlStatement);
@@ -673,8 +676,11 @@ abstract TableSourceItem (SqlAstNode) to SqlAstNode
         if ((node is ql.sql.TableSpec)) return new TableSourceItem(node);
         if ((node is ql.sql.AliasedTerm<Dynamic>)) {
             var al:AliasedTerm<SqlAstNode> = cast node;
-            if ((al.term is TableSpec) || (al.term is NestedSelectStatement)) return new TableSourceItem(node);
+            if ((al.term is ql.sql.TableSpec) || (al.term is ql.sql.NestedSelectStatement)) return new TableSourceItem(node);
+
+			throw new pm.Error('Unexpected ${Type.getClassName(Type.getClass(al.term))}');
         }
+        if ((node is ql.sql.NestedSelectStatement)) return new TableSourceItem(node);
 
         throw new pm.Error('Unexpected ${Type.getClassName(Type.getClass(node))}');
     }
@@ -692,9 +698,9 @@ class TableSpec extends SqlAstNode {
     @:keep
     public function toString() return tableName.identifier;
 
-    extern inline public function tableInstance():Null<Dynamic> {
-        return tableName.table;
-    }
+    // extern inline public function tableInstance():Null<Dynamic> {
+    //     return tableName.table;
+    // }
 }
 
 /*=  NotImplemented */

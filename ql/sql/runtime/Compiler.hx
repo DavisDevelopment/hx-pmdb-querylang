@@ -1,5 +1,13 @@
 package ql.sql.runtime;
 
+import ql.sql.runtime.Stmt.CSTNode;
+import ql.sql.runtime.Stmt.SelectStmt;
+import ql.sql.runtime.Sel.TableStream;
+import ql.sql.runtime.Sel.TableSource as TblSrc;
+import ql.sql.runtime.Sel.TableSourceItem as TblSrcItem;
+import ql.sql.runtime.Sel.TableRef;
+import ql.sql.runtime.Sel.TableJoin;
+import ql.sql.runtime.Sel.Aliased;
 import haxe.ds.Either;
 import ql.sql.runtime.Sel.SelectImpl;
 import pmdb.core.Object;
@@ -22,12 +30,13 @@ using pm.Strings;
 
 using pm.Functions;
 
-class Compiler {
-    var querySource: Array<TableSpec>;
+class Compiler extends SqlRuntime {
     public var context(default, set): Null<Context<Dynamic, Dynamic, Dynamic>> = null;
 
     public function new(?ctx) {
         // this.context = new Context();
+        super();
+        this._ctx = ctx;
         this.context = ctx;
     }
 
@@ -35,15 +44,12 @@ class Compiler {
     private inline function get_glue():Glue<Dynamic, Dynamic, Dynamic> return this.context.glue;
 
 	private function set_context(c:Null<Context<Dynamic, Dynamic, Dynamic>>) {
+        this._ctx = c;
         this.context = c;
+
         if (this.context != null) {
             for (n in this.context.glue.dbListTables(this.context.database)) {
-                try {
-                    loadTable(n);
-                }
-                catch (e: Dynamic) {
-                    #if Console.hx Console.error(e); #else trace(e); #end
-                }
+                loadTable(n);
             }
             // for (tbl in tables) {
             //     var schema = context.glue.tblGetSchema(tbl);
@@ -53,44 +59,289 @@ class Compiler {
         return c;
     }
 
-    public function loadTable(name: String):Null<Dynamic> {
-        if (context.tables.exists(name))
-            return context.tables.get(name);
-        var res = context.tables[name] = glue.dbLoadTable(context.database, name);
-        var schema = glue.tblGetSchema(res);
-        schema.context = this.context;
-        for (field in schema.fields) {
-            if (field.defaultValueString != null && field.defaultValueExpr == null) {
-                var e = NewSqlParser.readExpression(field.defaultValueString);
-                var e = this.compileExpression(e);
-                field.defaultValueExpr = e;
-            }
+    // public function loadTable(name: String):Null<Dynamic> {
+    //     Console.examine(name);
+    //     if (context.tables.exists(name))
+    //         return context.tables.get(name);
+    //     var res = context.tables[name] = glue.dbLoadTable(context.database, name);
+    //     if (res == null) {
+    //         res = context.tables[name] = context.scope.lookup(name);
+    //     }
+
+    //     var schema = glue.tblGetSchema(res);
+    //     visitSqlSchema(schema);
+    //     trace('LOADED "$name"');
+    //     return res;
+    // }
+    override function loadTable(name:String):Null<Dynamic> {
+        var table = super.loadTable(name);
+        if (table != null) {
+            var schema = context.glue.tblGetSchema(table);
+            visitSqlSchema(schema);
         }
-        trace('LOADED "$name"');
-        return res;
+        return table;
     }
 
-    public function compile(stmt: SqlStatement) {
-        var selectStmt = stmt.toSelect();
-        return compileSelectStmt(selectStmt);
+    public function compile(stmt: SqlStatement):Stmt {
+        // var selectStmt = stmt.toSelect();
+        // return compileSelectStmt(selectStmt);
+        switch stmt.data {
+            case DmlStatement(dml): 
+                switch dml {
+                    case SelectStatement(select):
+                        // var node:CSTNode = new SelectStmt(compileSelectStmt(select));
+						var node = compileSelectStmt(select);
+                        return new Stmt(node, SelectStatement(cast node));
+                }
+        }
     }
 
-    function compileSelectStmt(select : SelectStatement) {
+    function visitSqlSchema(schema: SqlSchema<Dynamic>) {
+		schema.context = this.context;
+		for (field in schema.fields) {
+			if (field.defaultValueString != null && field.defaultValueExpr == null) {
+				var e = NewSqlParser.readExpression(field.defaultValueString);
+				var e = this.compileExpression(e);
+				field.defaultValueExpr = e;
+			}
+		}
+    }
+
+    function compileSelectStmt(select : SelectStatement):Sel<Dynamic, Dynamic, Dynamic> {
         var query = select.query.query;
         if (query.from == null)
             throw new pm.Error.WTFError();
-        var tableSpec = query.from.tables[0].tableSourceItem.toTableSpec();
-        this.querySource = [tableSpec];
-        this.resolveSources();
-        var items:Array<SelItem> = [for (el in query.elements) compileSelectElement(el)];
-        var predicate = query.from.where != null ? compileSelectPredicate(query.from.where.predicate) : null;
 
-        // 
+        var csrcList:Array<TblSrc> = [for (tbl in query.from.tables) tableSourceConvert(tbl)];
+        var csrc:TblSrc = null;
+        switch csrcList {
+            case [one]:
+                csrc = one;
+
+            default:
+                throw new pm.Error('Unhandled $csrcList');
+        }
+        
+        var querySource = [];
+        var thisSource = csrc.getSpec(context);
+        trace(thisSource);
+        querySource.push(thisSource);
+        /*
+            thisSource = new ql.sql.runtime.VirtualMachine.TableSpec(
+                csrc.getName(context), 
+                csrc.getSchema(context),
+                switch csrc.item {
+                    case Table({alias:null, term:r}): {table:r.table};
+                    case Table({alias:alias, term:r}):
+                        querySource.push(new TableSpec(alias, glue.tblGetSchema(r.table), {table:r.table}));
+                        {src: querySource[0]};
+                    case Stream({alias:name, term:stream}):
+                        {
+                            stream: stream,
+                            stmt: stream.select
+                        };
+                }
+            )
+        */
+
+        // if (context.querySources.length == 0)
+            // context.querySources = querySource;
+        // else {
+            for (x in querySource)
+                context.addQuerySource(x);
+            // querySource = context.querySources;
+        // }
+
+        if (csrc.joins != null) {
+            for (j in csrc.joins) {
+                context.addQuerySource(j.mJoinWith.unwrap().src.unwrap());
+            }
+        }
+        
+        var predicate = query.from.where != null ? compileSelectPredicate(query.from.where.predicate) : null;
+        
+        var items:Array<SelItem> = [for (el in query.elements) compileSelectElement(el)];
         var out:SelOutput = items;
-        compileSelOutput(out);
-        var result = new Sel(this.context, tableSpec.tableName.table, new SelectImpl(select, predicate, out));
+        compileSelOutput(out, thisSource);
+        
+        var result = new Sel(
+            this.context,
+            csrc,
+            new SelectImpl(select, predicate, out)
+        );
+        var pre = result.evalHead;
+		// switch csrc.item {
+		// 	case Table({alias: alias, term: {table: table, name: name}}):
+        //         pre.push(function(g) {
+        //             g.context.currentDefaultTable = alias.nor(name);
+        //             return null;
+        //         });
+
+		// 	case Stream({alias:name}):
+        //         pre.push(function(g) {
+        //             g.context.currentDefaultTable = name;
+        //             return null;
+        //         });
+        // }
+        var tmp = @:privateAccess context.mSrcStack.top().copy();
+        pre.push(g -> {
+            g.context.pushSourceScope(tmp);
+            g.context.beginScope();
+            g.context.use(thisSource);
+        });
+        result.evalTail.push(g -> {
+            g.context.popSourceScope();
+            g.context.endScope();
+        });
+
+        if (query.orderBy != null) {
+            result.i.order = query.orderBy.expressions.map(function(o) {
+                return {
+                    accessor: compileExpression(o.expression),
+                    direction: switch o.sortType {
+                        case Asc: 1;
+                        case Desc: -1;
+                    }
+                };
+            });
+        }
 
         return result;
+    }
+
+	inline function toTblSrcItem(i:TableSourceItem):TblSrcItem {
+		var res = tableSourceItemConvert(i);
+		compileTblSrcItem(res);
+		return res;
+	}
+
+    function tableSourceConvert(src: TableSource):TblSrc {
+        // Console.examine(src);
+        var item = toTblSrcItem(src.tableSourceItem);
+
+        // var csrc:TblSrc = new TblSrc(Table(new Aliased(alias, new TableRef(tableSpec.tableName.identifier, table))));
+        var csrc = new TblSrc(item);
+		var joins = src.joins;
+		if (joins != null) {
+			var cjoins:Array<TableJoin> = new Array();
+			for (join in joins) {
+				// var tbl = tableSourceItemConvert(join.joinWith).
+                var cjoin = new TableJoin(join.joinType, toTblSrcItem(join.joinWith));
+                var tmp = new TblSrc(cjoin.joinWith);
+                var joinSrc = tmp.getSpec(context);
+                context.resolveTableFrom(joinSrc);
+                cjoin.mJoinWith = {src:joinSrc};
+                
+                if (join.on != null) {
+                    context.pushSourceScope([joinSrc]);
+                    // context.querySources.push(joinSrc);
+                    cjoin.on = compileSelectPredicate(cast join.on);
+                    // context.querySources = tmp;
+                    context.popSourceScope();
+                }
+                
+				if (join.used != null) {
+					throw new pm.Error('TODO');
+				}
+				cjoins.push(cjoin);
+			}
+			// (csrc.joins != null ? csrc.joins : (csrc.joins = [])).push()
+			csrc.joins = cjoins;
+        }
+        
+        return csrc;
+    }
+
+    private var targetQuerySource:Null<TableSpec> = null;
+    function tableSourceItemConvert(item: TableSourceItem):TblSrcItem {
+        var alias:Null<String> = null;
+        var tableSpec:Null<ql.sql.TsAst.TableSpec> = null;
+        // var cjoins = null;
+        final node:SqlAstNode = item;
+        var tableStream:Null<TableStream> = null;
+        
+        if ((node is ql.sql.TableSpec)) {
+            tableSpec = cast node;
+        }
+
+        if ((node is ql.sql.AliasedTerm<Dynamic>)) {
+            var aliased:AliasedTerm<Dynamic> = cast node;
+            var term:SqlAstNode = aliased.term;
+            alias = aliased.alias.identifier;
+
+            if ((term is ql.sql.TableSpec)) {
+                tableSpec = (term : TableSourceItem).toTableSpec();
+            }
+
+            if ((term is ql.sql.NestedSelectStatement)) {
+                var subStmt:NestedSelectStatement = cast term;
+
+                // context.pushSourceScope([
+                    // new TableSpec('$alias:${}')
+                // ])
+                var stmt = compileSelectStmt(subStmt.statement);
+                //Console.examine(stmt.i._exporter);
+
+                tableStream = new TableStream();
+                tableStream.astNode = term;
+                tableStream.schema = stmt.resultSchema;
+                tableStream.open = function(g) {
+                    stmt.context = g.context;
+                    return stmt.eval().iterator().map(function(row: Dynamic) {
+                        // g.context.currentRows[alias] = row;
+                        g.context.focus(row, alias);
+                        // //Console.examine(g.context.currentRows);
+                        return row;
+                    });
+                };
+            }
+        }
+
+        if ((node is ql.sql.NestedSelectStatement)) {
+            var subStmt:NestedSelectStatement = cast node;
+            var stmt = compileSelectStmt(subStmt.statement);
+			tableStream = new TableStream();
+			tableStream.astNode = subStmt;
+			tableStream.schema = stmt.resultSchema;
+			tableStream.open = function(g) {
+				stmt.context = g.context;
+				return stmt.eval().iterator().map(function(row:Dynamic) {
+                    // g.context.currentRow = row;
+                    g.context.focus(row, '_');
+					// //Console.examine(g.context.currentRows);
+					return row;
+				});
+			};
+        }
+
+        if (tableSpec != null) {
+            var table = context.resolveTableFrom(context.getSource(tableSpec.tableName.identifier));
+
+            if (table == null) throw new pm.Error();
+            if (alias != null) {
+                context.scope.define(alias, table);
+            }
+
+            return TblSrcItem.Table(new Aliased(alias, new TableRef(tableSpec.tableName.identifier, table)));
+        }
+
+        if (tableStream != null) {
+            return TblSrcItem.Stream(new Aliased(alias, (tableStream : TableStream)));
+        }
+
+        throw new pm.Error.ValueError(item);
+    }
+
+    function compileTblSrcItem(item: TblSrcItem) {
+        switch item {
+            case Table({term:{table:table}}):
+                var schema = glue.tblGetSchema(table);
+                visitSqlSchema(schema);
+
+            case Stream(a={term:{schema:schema}}):
+                //Console.examine(a);
+                visitSqlSchema(schema);
+        }
     }
 
     function compileSelectElement(element: ESelectElement) {
@@ -148,30 +399,34 @@ class Compiler {
      * @param item 
      * @return f (g:{context, out:`ImmutableStruct<TypedValue>`})->`ImmutableStruct<TypedValue>`
      */
-    function compileSelItem(item: SelItem):(g:{context:Context<Dynamic, Dynamic, Dynamic>}, out:ImmutableStruct<TypedValue>)->ImmutableStruct<TypedValue> {
+    function compileSelItem(item: SelItem):(g:{context:Context<Dynamic, Dynamic, Dynamic>}, out:Doc)->Doc {
+        inline function s(sym: SqlSymbol) return if (sym != null) sym.identifier else null;
+
         return switch item {
             case All(table):
-                resolveTableToSymbol(table);
-                var schema = context.glue.tblGetSchema(table.table);
+                // resolveTableToSymbol(table);
+                var schema = getTableSchema(table.identifier);
 
-                function(g, out:ImmutableStruct<TypedValue>) {
-                    var row:Doc = g.context.currentRow;
+                function(g, out:Doc):Doc {
+                    var row:Doc = g.context.getCurrentRow(s(table));
                     for (field in schema.fields) {
-                        out = out.append(field.name, (row[field.name] : TypedValue));
+                        // out = out.append(field.name, (row[field.name] : TypedValue));
+                        out[field.name] = row[field.name];
                     }
                     return out;
                 }
             
             case Column(table, column, alias):
-                resolveTableToSymbol(table);
-                var schema = context.glue.tblGetSchema(table.table);
                 var outKey = alias.nor(column);
-				var outColumn = schema.column(column.identifier);
-                function(g, out:ImmutableStruct<TypedValue>) {
-                    var row:Doc = g.context.currentRow;
-                    var value:Dynamic = row[column.identifier];
-                    var value = new TypedValue(value, outColumn.type);
-                    return out.append(outKey.identifier, value);
+                Console.debug({table:s(table), column:s(column), alias:s(alias)});
+                
+                function(g, out:Doc):Doc {
+                    var row:Null<Doc> = g.context.getCurrentRow(s(table));
+                    final row:Doc = row.unwrap();
+                    final value:Dynamic = exportValue(row.get(s(column)));
+
+                    out[outKey.identifier] = value;
+                    return out;
                 }
             
             case Expression(alias, expr):
@@ -184,24 +439,40 @@ class Compiler {
                     key = alias.identifier;
                 }
 
-                function(g, out:ImmutableStruct<TypedValue>):ImmutableStruct<TypedValue> {
-                    return out.append(key, TypedValue.ofAny(expr.eval(g)));
+                function(g, out:Doc):Doc {
+                    // return out.append(key, TypedValue.ofAny(expr.eval(g)));
+                    out[key] = exportValue(expr.eval(g));
+                    return out;
                 }
         }
     }
 
-    function compileSelOutSchema(out: SelOutput) {
+    inline function exportValue(value: Dynamic):Dynamic {
+        if (TypedValue.is(value)) {
+            return (untyped value : TypedValue).export();
+        }
+        else {
+            return value;
+        }
+    }
+
+	function compileSelOutSchema(out:SelOutput, src:TableSpec) {
         var columns = new Array();
         for (item in out.items) {
             switch item {
+                case All(null):
+                    for (c in src.schema.fields)
+                        columns.push(c.getInit());
+                
                 case All(table):
-                    var schema = context.glue.tblGetSchema(table.table);
+                    var schema = getTableSchema(table.identifier);
                     for (c in schema.fields) {
                         columns.push(c.getInit());
                     }
 
                 case Column(table, column, alias):
-                    final col = context.glue.tblGetSchema(table.table).column(column.identifier).getInit();
+                    // final col = context.glue.tblGetSchema(table.table).column(column.identifier).getInit();
+                    final col = getColumnField(column.identifier, if (table != null) table.identifier else null).getInit();
                     if (alias != null)
                         col.name = alias.identifier;
                     columns.push(col);
@@ -226,6 +497,7 @@ class Compiler {
         });
 
         out.schema = schema;
+        visitSqlSchema(out.schema);
 
         return schema;
     }
@@ -240,156 +512,100 @@ class Compiler {
 		}).toMutable();
     }
 
-    function compileSelOutput(exporter: SelOutput) {
+    function compileSelOutput(exporter:SelOutput, src:TableSpec) {
+        var schema = compileSelOutSchema(exporter, src);
+        switch exporter.items.toArray() {
+            case [All(table)]:
+                exporter.mCompiled = function(g) {
+                    // g.context.currentDefaultTable = table.identifier;
+                    return g.context.getCurrentRow(table.label());
+                };
+                return ;
+
+            default:
+        }
+        
         var items = exporter.items.map(item -> compileSelItem(item)).toArray();
         items.reverse();
-        var schema = compileSelOutSchema(exporter);
+        // var schema = compileSelOutSchema(exporter);
 
         var f = function(g) {
-            var out:ImmutableStruct<TypedValue> = new ImmutableStruct();
+            var out:Doc = new Doc();
             for (mut in items)
                 out = mut(g, out);
-            var obj:Doc = toMutableStruct(out);
-            obj = Doc.unsafe(schema.induct(obj));
-            return obj;
+            // var obj:Doc = toMutableStruct(out);
+            // obj = Doc.unsafe(schema.induct(obj));
+            // return obj;
+            out = schema.induct(out);
+            return out;
         };
         exporter.mCompiled = f;
     }
 
     function compileSelectPredicate(predicate: Predicate):SelPredicate {
-        if ((predicate is RelationPredicate)) {
-            var rp = cast(predicate, RelationPredicate);
-            
-            var left = compileExpression1(rp.left);
-            var right = compileExpression1(rp.right);
-            compileExpression2(left);
-            compileExpression2(right);
-            var rpo = RelationPredicateOperator, rel;
-            var res = new SelPredicate(SelPredicateType.Rel(rel = new RelationalPredicate(switch rp.op {
-                case OpEq: rpo.Equals;
-                case OpNEq: rpo.NotEquals;
-                case OpGt: rpo.Greater;
-                case OpGte: rpo.GreaterEq;
-                case OpLt: rpo.Lesser;
-                case OpLte: rpo.LesserEq;
-            }, left, right)));
-            res.mCompiled = g -> rel.eval(g);
-            return res;
-        }
+        var pred = this.predicateNodeConvert(predicate);
+        compileTPred(pred);
+        return pred;
+    }
 
-        if ((predicate is NotPredicate)) {
-            var np = cast(predicate, NotPredicate);
-            var p = compileSelectPredicate(np.predicate);
-            var tmp = p.mCompiled;
-            p.mCompiled = g -> !tmp(g);
-            return p;
-        }
+    function compileTPred(pred: SelPredicate) {
+		switch pred.type {
+			case Rel(relation):
+				// TODO
+				switch relation.op {
+					case Equals:
+					// TODO
+					case NotEquals:
+					// TODO
+					case Greater:
+					// TODO
+					case Lesser:
+					// TODO
+					case GreaterEq:
+					// TODO
+					case LesserEq:
+					// TODO
+					case In:
+						// TODO
+				}
+				compileTExpr(relation.left);
+				compileTExpr(relation.right);
+				pred.mCompiled = g -> relation.eval(g);
 
-        if ((predicate is ql.sql.grammar.expression.InPredicate)) {
-            var p = cast(predicate, InPredicate);
-            var left = compileExpression(p.left);
-            switch p.right.data {
-                case LExpression(e):
-                    var right = compileExpression(e);
-                    var rel;
-                    var res = new SelPredicate(SelPredicateType.Rel(rel = new RelationalPredicate(In, left, right)));
-                    res.mCompiled = g -> rel.eval(g);
-                    return res;
+			case And(subs):
+				for (p in subs)
+                    compileTPred(p);
+                    pred.mCompiled = function(g) {
+					for (predicate in subs)
+						if (!predicate.eval(g))
+							return false;
+					return true;
+				};
 
-                case LSubSelect(select):
-                    throw new pm.Error('TODO');
-            }
-        }
-
-        if ((predicate is ql.sql.grammar.expression.AndPredicate)) {
-            var p = cast(predicate, AndPredicate);
-            var left = compileSelectPredicate(p.left);
-            var right = compileSelectPredicate(p.right);
-            var res = SelPredicate.And(left, right);
-            // res.mCompiled = g -> (left.eval(g) && right.eval(g));
-			switch res.type {
-				case And(subs):
-					res.mCompiled = function(g) {
-						for (predicate in subs)
-							if (!predicate.eval(g))
-								return false;
-						return true;
-					};
-				default:
-			}
-            return res;
-        }
-
-		if ((predicate is ql.sql.grammar.expression.OrPredicate)) {
-			var p = cast(predicate, OrPredicate);
-			var left = compileSelectPredicate(p.left);
-			var right = compileSelectPredicate(p.right);
-            var res = SelPredicate.Or(left, right);
-            switch res.type {
-                case Or(subs):
-                    res.mCompiled = function(g) {
-                        for (predicate in subs)
-                            if (predicate.eval(g))
-                                return true;
-                        return false;
-                    };
-                default:
-            }
-			return res;
+			case Or(subs):
+				for (p in subs)
+					compileTPred(p);
+				pred.mCompiled = function(g) {
+					for (predicate in subs)
+						if (predicate.eval(g))
+							return true;
+					return false;
+                };
+                
+            case Not(sub):
+                compileTPred(sub);
+                var tmp = sub.mCompiled;
+                pred.mCompiled = g -> !tmp(g);
 		}
-        
-        throw new pm.Error('Unhandled ' + Type.getClassName(Type.getClass(predicate)));
     }
 
     /**
       compiles the given expression into some shit
      **/
     extern inline private function compileExpression(e: Expression) {
-        var expr = compileExpression1(e);
-        compileExpression2(expr);
+        var expr = expressionNodeConvert(e);
+        compileTExpr(expr);
         return expr;
-    }
-
-    function compileExpression1(e: Expression):TExpr {
-        if ((e is Predicate)) throw new pm.Error('Compile predicate nodes with compileSelectPredicate');
-        if ((e is C<Dynamic>)) {
-            var value:Dynamic = (cast e : C<Dynamic>).getConstValue();
-            final type = TExprType.TConst(value);
-            return new TExpr(type);
-        }
-
-        if ((e is ql.sql.grammar.expression.ColumnName)) {
-			var c = cast(e, ql.sql.grammar.expression.Expression.ColumnName);
-            resolveTableSymbol(c);
-            c.name.type = SqlSymbolType.Field;
-            return new TExpr(TExprType.TColumn(c.name, c.table));
-        }
-
-        if ((e is ArithmeticOperation)) {
-            var ao:ArithmeticOperation = cast(e, ArithmeticOperation);
-            var left = compileExpression(ao.left),
-                right = compileExpression(ao.right);
-            var type = TExprType.TBinop(ao.op.toBinaryOperator(), left, right);
-            return new TExpr(type);
-        }
-
-        if ((e is FunctionCallBase<Dynamic>)) {
-            if ((e is ql.sql.grammar.expression.SimpleFunctionCall)) {
-                var call:SimpleFunctionCall = cast e;
-                // return new TExpr(TExprType.TFunc(new TFunction(call.symbol, call.kind, function() {
-                //     throw -9;
-                // })));
-                var f = new TFunction(call.symbol, call.kind);
-                var type = TExprType.TFunc(f);
-                var fe = new TExpr(type);
-                type = TExprType.TCall(fe, call.args.map(x -> compileExpression(x)));
-                return new TExpr(type);
-            }
-
-            throw new pm.Error('Invalid FunctionCallBase<?> instance ${Type.getClassName(Type.getClass(e))}');
-        }
-
-        throw new pm.Error(Type.getClassName(Type.getClass(e)));
     }
 
     /**
@@ -399,61 +615,76 @@ class Compiler {
      - `TObjectDecl(fields: Array<{field:String, value:TExpr}>)`
    **/
     var parameters:Map<String, Array<TExpr>> = new Map();
-    private function compileExpression2(e: TExpr) {
-        typeExpr(e);
-
+    private function compileTExpr(e: TExpr) {
         switch e.expr {
             case TConst(value):
                 e.mConstant = value.value;
                 e.mCompiled = exprc(e);
             
-            case TTable(name):
-                e.mCompiled = exprc(e);
+            // case TTable(name):
+            //     e.mCompiled = exprc(e);
             
             case TColumn(name, table):
-                resolveTableToSymbol(table);
-                var column = glue.tblGetSchema(table.table).column(name.identifier);
-                e.type = column.type;
                 e.mCompiled = exprc(e);
 
             case TField(o, _):
-                compileExpression2(o);
+                compileTExpr(o);
                 e.mCompiled = exprc(e);
 
-            case TParam({label:label}):
-                e.mCompiled = exprc(e);
+            // case TParam({label:label}):
+            //     e.mCompiled = exprc(e);
 
-            case TFunc(f):
-                e.mCompiled = exprc(e);
+            // case TFunc(f):
+            //     e.mCompiled = exprc(e);
 
             case TCall(f, args):
-                compileExpression2(f);
+                compileTExpr(f);
                 for (x in args)
-                    compileExpression2(x);
+                    compileTExpr(x);
                 e.mCompiled = exprc(e);
 
             case TBinop(op, left, right):
-                compileExpression2(left);
-                compileExpression2(right);
+                compileTExpr(left);
+                compileTExpr(right);
                 e.mCompiled = exprc(e);
                 
             case TUnop(_, _, value):
-                compileExpression2(value);
+                compileTExpr(value);
                 e.mCompiled = exprc(e);
 
             case TArrayDecl(values):
-                throw new pm.Error.NotImplementedError();
+                for (valueExpr in values)
+                    compileTExpr(valueExpr);
+                e.mCompiled = exprc(e);
 
-            case TObjectDecl(fields):
-                throw new pm.Error.NotImplementedError();
+            case most:
+                e.mCompiled = exprc(e);
         }
+
+        //*[Probably Useless(?)]
+        e.extra.set('compilationLevel', 1);
+
+		typeExpr(e);
     }
 
+    /**
+     * returns a lambda function for performing an optimized version of the expression's computation
+     * @param expr 
+     * @return JITFn<Dynamic>
+     */
     private function exprc(expr: TExpr):JITFn<Dynamic> {
+        if (expr.extra.exists('compilationLevel')) {
+            Console.error('Expression already compiled');
+            return expr.mCompiled;
+        }
+
         return switch expr.expr {
             case TConst(value):
                 // var v = value.clone();
                 g -> value.value;
+
+            case TReference(name):
+                g -> g.context.get(name);
 
 			case TParam({label: label, offset: offset}):
 				if (!parameters.exists(label.identifier)) {
@@ -464,7 +695,7 @@ class Compiler {
                 }
 
                 function(g:{context:Context<Dynamic, Dynamic, Dynamic>}):Dynamic {
-                    throw new pm.Error.NotImplementedError();
+                    return new pm.Error('No value bound to ${label.identifier}');
                 }
                 
             case TTable(name):
@@ -473,29 +704,59 @@ class Compiler {
                 };
 
             case TColumn(name, table):
-				function(g) {
-					var res:Dynamic = g.context.glue.rowGetColumnByName(g.context.currentRow, name.identifier);
-						// return res;
-					// });
-					return res;
-                };
+                final name = name.identifier;
+                final tableName = table.label();
 
-            case TField(o, field):
-				function(g) {
-					var res:Dynamic = g.context.glue.valGetField(o.eval(g), field.identifier);
-					return res;
-                };
+
+                function(g: Contextual) {
+                    final c = g.context;
+                    final row:Doc = Doc.unsafe(c.getCurrentRow(tableName));
+
+                    if (!row.exists(name))
+                        throw new pm.Error('$row has no property named "$name"');
+
+                    return row.get(name);
+                }
+
                 
+            case TField(o, field):
+                function(g) {
+                    var res:Dynamic = g.context.glue.valGetField(o.eval(g), field.identifier);
+                    return res;
+                };
+                    
             case TFunc(f):
                 var fname = f.symbol;
                 function(g) {
+                    Console.error('TFunc expression construct is deprecated');
                     return g.context.get(fname);
                 };
-
+            
+            //* Method calls
+            case TCall(m={expr:TField(object, method)}, args):
+                g -> throw new pm.Error.NotImplementedError();
+                
             case TCall(f, params):
-                function(g) {
+                final allConst = params.every(e -> e.mConstant != null);
+                final constantParameters = allConst ? [for (p in params) p.mConstant] : null;
+
+                if (allConst) {
+                    switch f.expr {
+                        case TReference(_.identifier=>fname), TFunc(_.symbol.identifier=>fname):
+                            if (context.scope.isDeclared(fname)) {
+                                var fptr = cast(context.scope.lookup(fname), F);
+                                return function(g) {
+                                    return fptr.call(constantParameters);
+                                };
+                            }
+
+                        default:
+                    }
+                }
+
+                function(g: Contextual) {
                     var fn:Dynamic = f.eval( g );
-                    var args = [for (p in params) p.eval(g)];
+                    var args = allConst ? constantParameters : [for (p in params) p.eval(g)];
 
                     if ((fn is F)) {
                         var ret = cast(fn, F).call(args);
@@ -521,7 +782,6 @@ class Compiler {
             case TArrayDecl(values):
                 var allConst = true;
                 for (value in values) {
-                    compileExpression2(value);
                     if (allConst && value.mConstant == null)
                         allConst = false;
                 }
@@ -603,8 +863,17 @@ class Compiler {
     }
 
     function typeExpr(e: TExpr) {
-        // if (e.is)
+        var compLvl:Int = e.extra.compilationLevel;
+        switch compLvl {
+            case 1://* Expected value
+            default:
+                Console.error('Unhandled: Expr.compilationLevel = $compLvl');
+        }
+
         switch e.expr {
+            case TReference({identifier:id}):
+                throw new pm.Error('TODO');
+            
             case TBinop(op, left, right):
                 typeExpr(left);
                 typeExpr(right);
@@ -624,9 +893,10 @@ class Compiler {
                 }
 
             case TColumn(name, table):
-                resolveTableToSymbol(table);
-                var schema = glue.tblGetSchema(table.table);
-                e.type = schema.column(name.identifier).type;
+                e.type = switch getColumnField(name.identifier, table != null ? table.identifier : null) {
+                    case null: TUnknown;
+                    case c: c.type;
+                }
 
             case TFunc(f):
                 // throw new pm.Error('TODO');
@@ -644,10 +914,49 @@ class Compiler {
                     typeExpr(p);
                 
             case TConst(_):
-            case TArrayDecl(_):
-            case TObjectDecl(_):
+                e.type = exprt(e);
+            case TArrayDecl(_)://TODO
+            case TObjectDecl(_)://TODO
         }
     }
+
+	/**
+	 * computes the `SType` of the given expression
+	 * @param e the Expression
+	 * @return the computed type
+	 */
+	function exprt(e:TExpr):SType {
+		switch e.expr {
+			case TConst(value):
+				value.validate();
+                return value.type;
+            
+			case TColumn(name, table):
+				// var schema = context.getTableSchema(table.identifier);
+                // return schema.column(name.identifier).type;
+                return context.getColumnField(name.identifier, table != null ? table.identifier : null).type;
+            case TReference(name):
+                throw new pm.Error.NotImplementedError();
+            case TParam(name):
+				throw new pm.Error.NotImplementedError();
+			case TTable(name):
+				throw new pm.Error.NotImplementedError();
+			case TField(o, field):
+				throw new pm.Error.NotImplementedError();
+			case TFunc(f):
+				throw new pm.Error.NotImplementedError();
+			case TCall(f, params):
+				throw new pm.Error.NotImplementedError();
+			case TBinop(op, left, right):
+				throw new pm.Error.NotImplementedError();
+			case TUnop(op, _, e):
+				throw new pm.Error.NotImplementedError();
+			case TArrayDecl(_):
+				throw new pm.Error.NotImplementedError();
+			case TObjectDecl(_):
+				throw new pm.Error.NotImplementedError();
+		}
+	}
 
     function typeSelPredicate(p: SelPredicate) {
         switch p.type {
@@ -716,71 +1025,17 @@ class Compiler {
             case Or(p):
                 for (x in p)
                     typeSelPredicate(x);
+
+            case Not(sub):
+                typeSelPredicate(sub);
         }
     }
 
-    function exprt(e: TExpr):SType {
-        switch e.expr {
-            case TConst(value):
-                value.validate();
-                return value.type;
-            case TColumn(name, table):
-                var schema = glue.tblGetSchema(table.table);
-                return schema.column(name.identifier).type;
-            case TParam(name):
-                throw new pm.Error.NotImplementedError();
-            case TTable(name):
-                throw new pm.Error.NotImplementedError();
-            case TField(o, field):
-                throw new pm.Error.NotImplementedError();
-            case TFunc(f):
-                throw new pm.Error.NotImplementedError();
-            case TCall(f, params):
-                throw new pm.Error.NotImplementedError();
-            case TBinop(op, left, right):
-                throw new pm.Error.NotImplementedError();
-            case TUnop(op, _, e):
-                throw new pm.Error.NotImplementedError();
-            case TArrayDecl(_):
-                throw new pm.Error.NotImplementedError();
-            case TObjectDecl(_):
-				throw new pm.Error.NotImplementedError();
-        }
+    function getTableSchema(name: String):Null<SqlSchema<Dynamic>> {
+        // Console.examine(name);
+        return context.getTableSchema(name);
     }
-
-    function resolveTableToSymbol(name: SqlSymbol) {
-        name.type = Table;
-        var res = name.table = getTable(name);
-        this.loadTable(name.identifier);
-        return res;
-    }
-
-    function resolveSources() {
-        for (src in querySource) {
-            resolveTableToSymbol(src.tableName);
-        }
-    }
-
-    function resolveTableSymbol(el: {table:Null<SqlSymbol>}) {
-		if (el.table == null) {
-			switch querySource {
-				case [] | null:
-					throw 'wtf?';
-
-				case [spec]:
-					el.table = spec.tableName;
-
-				default:
-					throw new pm.Error('Invalid');
-			}
-        }
-
-        assert(el.table != null, new pm.Error('table symbol must be defined'));
-    }
-
-    function getTable(name: SqlSymbol):Null<Dynamic> {
-        if (context == null) return null;
-        
-        return loadTable(name.identifier);
+    function getColumnField(name:String, ?table:String) {
+        return context.getColumnField(name, table);
     }
 }

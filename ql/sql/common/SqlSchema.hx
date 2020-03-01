@@ -88,7 +88,18 @@ class SqlSchema<Row> {
      * @return Bool
      * @throws Error if any validation check fails;  Exception is always instance of `pm.Error`
      */
-    public function validate(row:Row, ?pos:haxe.PosInfos):Bool {
+    public function validate(row:Row, mutate=false, ?pos:haxe.PosInfos):Bool {
+        return switch test(row, mutate) {
+            case Success(true): true;
+            case Failure(errors):
+                #if debug
+                Console.error(errors);
+                #end
+                false;
+            case Success(false):
+                throw 'Unreachable';
+        }
+        
         var row:Doc = Doc.unsafe(row);
         for (field in fields) {
             var val = row.get(field.name);
@@ -109,7 +120,12 @@ class SqlSchema<Row> {
         return true;
     }
 
-    public function test(row: Row):Outcome<Bool, Array<Error>> {
+    /**
+     * attempts to validate the given object against `this` Schema
+     * @return Success(true) if validation passed
+     * @return Failure(`errors`) if validation failed
+     */
+    public function test(row:Row, mutate:Bool=false):Outcome<Bool, Array<Error>> {
 		var doc:Doc = Doc.unsafe(row);
         var errors:Array<Error> = [];
         var rowFields = new set.StringSet(doc.keys());
@@ -128,8 +144,18 @@ class SqlSchema<Row> {
                 try {
                     final correctType = field.type.validateValue(value);
                     if (!correctType) {
-                        errors.push(new Error('Expected ${field.type}, got $value'));
-                        continue;
+                        if (mutate) {
+                            try {
+                                doc[name] = field.type.importValue(value);
+                            }
+                            catch (err: Dynamic) {
+                                doc[name] = value;
+                            }
+                        }
+                        else {
+                            errors.push(new Error('Expected ${field.type}, got $value'));
+                            continue;
+                        }
                     }
                 }
                 catch (err: Error) {
@@ -199,10 +225,13 @@ class SqlSchema<Row> {
             final name = field.name;
 			if (field.autoIncrement && this.incrementers.exists(name)) {
 				row[name] = incrementers[name].next();
-            } 
+            }
             else if (field.defaultValueExpr != null) {
-				row[name] = field.type.importValue(field.defaultValueExpr.eval(this));
+                row[name] = field.type.importValue(field.defaultValueExpr.eval(this));
             } 
+            else if (field.defaultValueString != null) {
+                throw new Error('default-value expression not compiled');
+            }
             else {
 				throw(new Error('Field `${field.name}` missing from structure'));
 			}
@@ -239,62 +268,63 @@ class SqlSchema<Row> {
         return convertDocToRow(row);
     }
 
-    // function objectImporter():Doc -> Doc {
-    //     var fieldNames = fields.map(f -> f.name);
-    //     var picker = (o: Doc) -> inline o.pick(fieldNames);
-    //     var field_fns = fields.fields.map(f -> objectImporterFieldFn(f));
+    function objectImporter():Doc -> Doc {
+        var fieldNames = fields.map(f -> f.name);
+        var picker = (o: Doc) -> inline o.pick(fieldNames);
+        var field_fns = fields.fields.map(f -> objectImporterFieldFn(f));
 
-    //     var imp:Doc->Doc = function(o: Doc):Doc {
-    //         var row:Doc = picker(o);
+        var imp:Doc->Doc = function(o: Doc):Doc {
+            var row:Doc = picker(o);
 
-    //         for (f in field_fns)
-    //             f(o, row);
+            for (f in field_fns)
+                f(o, row);
 			
-    //         return row;
-    //     }
+            return row;
+        }
 
-    //     return imp;
-    // }
-    // function objectImporterFieldFn(field: SchemaField) {
-    //     final f = field;
-    //     final name = field.name;
+        return imp;
+    }
+    function objectImporterFieldFn(field: SchemaField) {
+        final f = field;
+        final name = field.name;
+        final fieldValImp = f.type.opt_importValue();
 
-	// 	inline function handleNull(field:SchemaField, row:Doc) {
-	// 		final name = field.name;
-	// 		if (field.autoIncrement && this.incrementers.exists(name)) {
-	// 			row[name] = incrementers[name].next();
-    //         } 
-    //         else if (field.defaultValueExpr != null) {
-	// 			row[name] = field.type.importValue(field.defaultValueExpr.eval(this));
-    //         } 
-    //         else {
-	// 			throw(new Error('Field `${field.name}` missing from structure'));
-    //         }
-    //     }
+		inline function handleNull(field:SchemaField, row:Doc) {
+			final name = field.name;
+			if (field.autoIncrement && this.incrementers.exists(name)) {
+				row[name] = incrementers[name].next();
+            } 
+            else if (field.defaultValueExpr != null) {
+				row[name] = fieldValImp(field.defaultValueExpr.eval(this));
+            } 
+            else {
+				throw(new Error('Field `${field.name}` missing from structure'));
+            }
+        }
         
-    //     function handleField(input:Doc, output:Doc) {
-	// 		if (input.exists(name)) {
-	// 			var value:Dynamic = input[name];
-	// 			if (value == null && f.notNull) {
-	// 				handleNull(f, output);
-    //             } 
-    //             else if (value == null) {
-	// 				output[name] = null;
-	// 				return ;
-	// 			}
+        function handleField(input:Doc, output:Doc) {
+			if (input.exists(name)) {
+				var value:Dynamic = input[name];
+				if (value == null && f.notNull) {
+					handleNull(f, output);
+                } 
+                else if (value == null) {
+					output[name] = null;
+					return ;
+				}
 
-	// 			output[name] = f.type.importValue(value);
-    //         } 
-    //         else if (f.notNull) {
-	// 			handleNull(f, output);
-    //         } 
-    //         else {
-	// 			output[name] = null;
-	// 		}
-    //     }
+				output[name] = fieldValImp(value);
+            } 
+            else if (f.notNull) {
+				handleNull(f, output);
+            } 
+            else {
+				output[name] = null;
+			}
+        }
 
-    //     return handleField;
-    // }
+        return handleField;
+    }
 
     /**
      * checks the validity of the given object as the 'constructor' argument

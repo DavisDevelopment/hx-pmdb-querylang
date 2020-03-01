@@ -17,6 +17,7 @@ import ql.sql.grammar.expression.Expression.Function;
 import ql.sql.grammar.expression.Expression.FunctionKind;
 import ql.sql.grammar.CommonTypes.BinaryOperator;
 import ql.sql.grammar.CommonTypes.UnaryOperator;
+import ql.sql.grammar.CommonTypes.Contextual;
 
 import ql.sql.runtime.VirtualMachine.Context;
 import haxe.Constraints.IMap;
@@ -68,8 +69,8 @@ abstract SelOutput (CSelOut) from CSelOut to CSelOut {
 
         for (item in this.items) {
             switch item {
-                case Column(_, column, alias):
-                    var value = c.glue.rowGetColumnByName(c.currentRow, column.identifier);
+                case Column(table, column, alias):
+                    var value = c.glue.rowGetColumnByName(c.getCurrentRow(table.label()), column.identifier);
                     if (alias == null) {
                         output[column.identifier] = value;
                     }
@@ -77,9 +78,17 @@ abstract SelOutput (CSelOut) from CSelOut to CSelOut {
                         output[alias.identifier] = value;
                     }
 
+                case All(null|{identifier:null}):
+                    var input:Doc = Doc.unsafe(c.getCurrentRow());
+                    for (f=>value in input) {
+                        output[f] = value;
+                    }
+
                 case All(table):
-                    for (col in c.glue.tblListColumns(table.table)) {
-                        var value = c.glue.rowGetColumnByName(c.currentRow, col.name);
+                    var n = table.label();
+                    var schema = c.getTableSchema(n);
+                    for (col in schema.fields) {
+                        var value = Doc.unsafe(c.getCurrentRow(n)).get(col.name);
                         output[col.name] = value;
                     }
 
@@ -138,6 +147,8 @@ class SelPredicate {
             case t.Or(p):
                 for (x in p)
                     x.bindParameters(params);
+            case t.Not(p):
+                p.bindParameters(params);
         }
     }
 
@@ -171,6 +182,7 @@ enum SelPredicateType {
     // Or(left:SelPredicate, right:SelPredicate);
     And(p: Array<SelPredicate>);
     Or(p: Array<SelPredicate>);
+    Not(negated: SelPredicate);
 }
 
 typedef IRNode<F:haxe.Constraints.Function> = {
@@ -207,7 +219,7 @@ class RelationalPredicate extends ARel<TExpr, TExpr> {
     public function new(op, l, r) {
         super(op, l, r);
 
-        this.mOpCompiled = this.op.getMethodHandle(left.type, right.type);
+        // this.mOpCompiled = this.op.getMethodHandle(left.type, right.type);
     }
 
     public function eval(g:{context:Context<Dynamic, Dynamic, Dynamic>}):Bool {
@@ -234,14 +246,16 @@ class RelationalPredicate extends ARel<TExpr, TExpr> {
 
 /**
  * TExpr - 
+ * TODO refactor Compiler to change all assignments of `type` based on the types of other expressions assignments to `typeHint` instead
  */
 class TExpr {
     public var mCompiled:Null<JITFn<Dynamic>> = null;
     public var mConstant:Null<Dynamic> = null;
     public final expr: TExprType;
     public var type:SType;
+    public var typeHint:Null<ImmutableList<SType>> = null;
 
-    private var _meta:Doc;
+    public var extra(default, null): Doc;
 
     public function new(e:TExprType) {
         this.expr = e;
@@ -254,20 +268,31 @@ class TExpr {
 
             default:
         }
-        this._meta = {};
+
+        this.extra = new Doc();
     }
 
     public function isTyped():Bool {
         return type.match(TUnknown);
     }
+    
+    public function suggestType(t: SType) {
+        if (t.match(TUnknown)) throw new pm.Error('y tho');
+        if (typeHint != null) {
+            if (!typeHint.has(t, (a, b)->a.eq(b)))
+                typeHint = t & typeHint;
+        }
+        else {
+            typeHint = ImmutableList.Hd(t, Tl);
+        }
+    }
 
-    public function eval(g:{context:Context<Dynamic, Dynamic, Dynamic>}):Dynamic {
-        if (mConstant != null) {
-            return mConstant;
-        }
-        if (mCompiled != null) {
-            return mCompiled(g);
-        }
+    public function eval(g: Contextual):Dynamic {
+        if (mConstant != null) return mConstant;
+        if (mCompiled != null) return mCompiled(g);
+
+        //TODO type
+        
         throw new pm.Error('No evaluation method provided for $expr');
     }
 
@@ -409,7 +434,7 @@ class TExprTypeTools {
                 return tvprint(value);
             case TParam(name): 
                 return ':${name.label}';
-            case TTable(name):
+            case TTable(name), TReference(name):
                 return name.identifier;
             case TColumn(name, table):
                 return table.identifier + '.' + name.identifier;

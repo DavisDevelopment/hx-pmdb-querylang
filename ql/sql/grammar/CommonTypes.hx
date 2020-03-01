@@ -210,6 +210,7 @@ enum IntervalType {
 /*=  "INNER" | "CROSS" | "LEFT OUTER" | "RIGHT OUTER" */
 enum JoinType {
 	Inner;
+	Outer;
 	Cross;
 	OuterLeft;
 	OuterRight;
@@ -270,16 +271,18 @@ enum SqlNodeType {
 	SelectIntoFieldsExpression;
 }
 
-class AbstractMethodCallError {
-	public var position:haxe.PosInfos;
+class AbstractMethodCallError extends pm.Error {
+	// public var position:haxe.PosInfos;
 	public var methodPath:String;
-	public var message:String;
+	// public var message:String;
 
 	public function new(?msg:String, ?pos:haxe.PosInfos) {
+		super('', 'AbstractMethodError', pos);
 		var path:String = if (pos == null) '' else '${pos.className}.${pos.methodName}';
-		position = pos;
-		methodPath = path;
-		message = if (msg != null) msg else 'AbstractMethodError: $methodPath should be overridden by extending classes';
+		// position = pos;
+		this.methodPath = path;
+
+		this.message = 'AbstractMethodError: $methodPath should be overridden by extending classes.' + if (msg != null) '\n$msg' else '';
 	}
 }
 
@@ -303,19 +306,40 @@ class SqlSymbol {
 	public var type:SqlSymbolType;
 	public var parent : AstSymbol<SqlSymbolType> = null;
 
-	public var table:Null<Dynamic> = null;
+	// public var table:Null<Dynamic> = null;
 	public var func:Null<Dynamic> = null;
 
-	public function new(id:String, ?type:SqlSymbolType, ?parent:SqlSymbol) {
+	public function new(id:String, ?type:SqlSymbolType, ?parent:SqlSymbol, ?pos:haxe.PosInfos) {
 		this.identifier = id;
 		this.parent = parent;
 		this.type = switch type {
 			case null: Unknown;
 			case t: t;
 		}
+
+		#if debug
+		if (!(identifier != null && identifier.length != 0))
+			throw new pm.Error('null identifier provided', null, pos);
+		#end
 	}
 
 	public inline function clone(?type:SqlSymbolType):SqlSymbol {
 		return new SqlSymbol(identifier, pm.Helpers.nor(type, this.type));
 	}
+
+	extern public inline function label():Null<String> {
+		return this == null ? null : identifier;
+	}
+}
+
+typedef TContextual<Db, Tbl, Row> = {context:ql.sql.runtime.VirtualMachine.Context<Db, Tbl, Row>};
+typedef Contextual = TContextual<Dynamic, Dynamic, Dynamic>;
+
+@:tink 
+interface IStmt<Result> {
+	public function printSql():String {
+		throw new AbstractMethodCallError();
+	}
+
+	public function eval():Result;
 }

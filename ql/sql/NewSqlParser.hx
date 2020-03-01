@@ -1,5 +1,6 @@
 package ql.sql;
 
+import pm.OneOrMany;
 import haxe.ds.GenericStack;
 import ql.sql.Query;
 import ql.sql.TsAst;
@@ -421,9 +422,15 @@ class NewSqlParser {
         }
 	}
 
-	function unexpected(t, ?pos:haxe.PosInfos) : Dynamic {
+	function unexpected(t, ?expectedInstead:OneOrMany<Token>, ?pos:haxe.PosInfos) : Dynamic {
 		//throw "Unexpected " + tokenStr(t);
-		throw SqlError.UnexpectedToken(t, pos);
+		var exp = expectedInstead == null ? null : expectedInstead.asMany();
+		var expectedString = exp == null ? null : (
+			exp.map(t -> Std.string(t)).join('|') + 
+			', or ' +
+			haxe.Json.stringify(exp.map(t -> tokenStr(t)))
+		);
+		throw SqlError.UnexpectedToken(t, expectedString, pos);
 		return null;
 	}
 
@@ -557,17 +564,76 @@ class NewSqlParser {
     //     }
 	// }
 
-	function parseQuerySource():TableSourceItem {
-        var t = token();
-        switch ( t ) {
-            case Ident(name):
-                return new TableSpec(symbol(name));
+	function parseQuerySourceItem():TableSourceItem {
+		var t = token();
+		var src:Null<TableSourceItem> = null;
+		// var tbl: Null<TableSourceItem> = null;
+		switch (t) {
+			case POpen:
+				src = parseQuerySourceItem();
+				req(PClose);
 
-            case _:
-                unexpected( t );
-        }
+			case Kwd('SELECT'):
+				// throw new pm.Error('TODO: nested SELECT stmt');
+				push(t);
+				var stmt = new NestedSelectStatement(parseQuery().toSelect());
+				src = stmt;
+				// if (!maybe(Kwd('AS')))
+				// 	unexpected(token(), Kwd('AS'));
 
-        return null;
+			case Ident(name):
+				var tableSpec = new TableSpec(symbol(name));
+				src = tableSpec;
+
+			case _:
+				unexpected(t);
+		}
+
+		if (maybe(Kwd('AS'))) {
+			src = new AliasedTerm(src, symbol(ident()));
+		}
+
+		return src;
+	}
+
+	function parseQuerySource():TableSource {
+		var src:Null<TableSource> = new TableSource(parseQuerySourceItem());
+		
+		var t = token();
+		switch t {
+			case Kwd(jk = ("INNER" | "OUTER" | "LEFT" | "RIGHT" | "CROSS")):
+				final joinModKwds = [jk];
+				while (true) {
+					t = token();
+					switch t {
+						case Kwd(kwd = ("INNER" | "OUTER" | "LEFT" | "RIGHT" | "CROSS")):
+							joinModKwds.push(kwd);
+
+						default:
+							push(t);
+							break;
+					}
+				}
+				req(Kwd('JOIN'));
+				var src2 = parseQuerySource();
+				req(Kwd("ON"));
+				var pred = parsePredicate();
+				if (src.joins == null) 
+					src.joins = [];
+				src.joins.push(new JoinClause(src2.tableSourceItem, switch jk {
+					case 'INNER': JoinType.Inner;
+					case 'OUTER': JoinType.Outer;
+					case 'LEFT': JoinType.OuterLeft;
+					case 'RIGHT': JoinType.OuterRight;
+					default:
+						throw new pm.Error('Unhandled $jk JOIN!');
+				}, pred));
+
+			default:
+				push(t);
+		}
+
+        return src;
 	}
 
 	function parseSqlType():SqlType {
@@ -721,7 +787,8 @@ class NewSqlParser {
 
 				var queryExpression:QueryExpression = new QueryExpression(fields);
 				var src = parseQuerySource();
-				queryExpression.from = new FromClause([new TableSource(src)]);
+				Console.debug(src);
+				queryExpression.from = new FromClause([src]);
                 var parseWherePredicate = false;
 				
                 while (true) try {
@@ -1207,7 +1274,7 @@ enum Token {
 
 enum SqlError {
     UnexpectedChar(c: String);
-    UnexpectedToken(t: Token, pos:haxe.PosInfos);
+    UnexpectedToken(t:Token, ?expected:String, pos:haxe.PosInfos);
 	Unclosed(c: String);
 	NotYetImplemented(?desc:String, pos:haxe.PosInfos);
 }

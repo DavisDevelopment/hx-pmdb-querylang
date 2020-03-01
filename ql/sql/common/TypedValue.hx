@@ -291,6 +291,11 @@ abstract TypedValue(CTypedValue) from CTypedValue to CTypedValue {
 	// 	return BinaryOperators.op_mod(a, b);
 	// }
 
+	public static var NULL(get, never):TypedValue;
+	private static inline function get_NULL():TypedValue {
+		return new TypedValue(null, TUnknown, Validate.Never);
+	}
+
 	@:from
 	public static function ofAny(value:Dynamic):TypedValue {
 		var type:SType = switch Type.typeof(value) {
@@ -387,7 +392,7 @@ class Operators {
 					case GreaterEq: utop_gte;
 					case LesserEq: utop_lte;
 					case In:
-						throw new pm.Error('Unreachable');
+						throw new pm.Error('$op, $leftType, $rightType');
 				}
 
 			default:

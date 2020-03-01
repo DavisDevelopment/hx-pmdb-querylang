@@ -3,6 +3,9 @@ package ql.sql.runtime;
 // import ql.sql.runtime.Sel.Context;
 // import ql.sql.runtime.Sel.Scope;
 
+import ql.sql.runtime.Stmt.SelectStmt;
+import ql.sql.runtime.Sel.TableStream;
+import pm.LinkedStack;
 import ql.sql.Dummy.DummyTable;
 import ql.sql.Dummy.AbstractDummyDatabase;
 import ql.sql.common.DateTime;
@@ -16,6 +19,8 @@ import ql.sql.runtime.DType;
 import ql.sql.runtime.SType;
 import pmdb.core.ValType;
 import haxe.Constraints.Function;
+
+import pm.Helpers.nor;
 
 class VirtualMachine {
     public var context: Ctx;
@@ -74,6 +79,10 @@ class Glue<TDb, Table, Row> {
 	
 	public function tblListColumns(table: Table):Array<SchemaField> {
 		return tblGetSchema(table).fields.fields.copy();
+	}
+
+	public function valIsTable(v: Dynamic):Bool {
+		throw new pm.Error.NotImplementedError();
 	}
 
 	public function valGetField(o:Dynamic, f:String):Dynamic return Reflect.field(o, f);
@@ -259,7 +268,15 @@ class F {
  * ====================================================================
  */
 
+/**
+ * node in the runtime CST
+ */
+interface VmNode {
+	public var context: Context<Dynamic, Dynamic, Dynamic>;
+}
+
 class Context<TDb, Table, Row> {
+//{region fields
     // @:allow(ql.sql.runtime.VirtualMachine)
     #if !debug @:noCompletion #end
     public var glue:Glue<TDb, Table, Row>;
@@ -268,34 +285,55 @@ class Context<TDb, Table, Row> {
 	public var tables:Map<String, Table>;
 	public var aliases:Scope<SqlSymbol>;
 	public var functions:Map<String, F>;
-    public var currentRow:Row;
+
+	private var mSrcStack:LinkedStack<Array<TableSpec>>;
+	public var querySources(get, never):haxe.ds.ReadOnlyArray<TableSpec>;
+
+	// public var currentDefaultTable:Null<String> = null;
+	public var currentDefaultTable(get, set):Null<String>;
+	function get_currentDefaultTable():Null<String> {
+		return scope.isDeclaredLocally(':srcid') ? scope.lookupLocal(':srcid') : null;
+	}
+	function set_currentDefaultTable(id: Null<String>):Null<String> {
+		scope.define(':srcid', id.unwrap(new pm.Error('Null-assignment not allowed')));
+		return id;
+	}
+
+	public var currentRows:Null<Map<String, Row>> = null;
+	// @:isVar
+	// public var currentRow(get, set):Row;
+	private var currentRow(default, null):Row;
     
 	public var scope:Scope<Dynamic>;
+//}endregion fields
 
 	public function new(?g: Glue<TDb, Table, Row>) {
-		// this.params = new Array();
+		this.glue = (g != null ? g : new Glue());
+
+		this.database = null;
 		this.scope = new Scope();
 		this.scope.define('parameters', new Doc());
 		this.aliases = new Scope();
 		this.functions = new Map();
-		this.database = null;
 		this.tables = new Map();
-        this.currentRow = null;
+
+		this.currentRow = null;
+		this.currentRows = new Map();
+		this.mSrcStack = new LinkedStack<Array<TableSpec>>([new Array<TableSpec>()]);
         
-		this.glue = (g != null ? g : new Glue());
 		
 		_init();
 	}
 
-	public var parameters(get, set):Doc;
-	private function get_parameters():Doc {return this.scope.lookup('parameters');}
-	private function set_parameters(p: Doc):Doc {return this.scope.assign('parameters', p);}
+	// public var parameters(get, set):Doc;
+	// private function get_parameters():Doc {return this.scope.lookup('parameters');}
+	// private function set_parameters(p: Doc):Doc {return this.scope.assign('parameters', p);}
 
 	// public var currentRow(get, set):Row;
 	// function get_currentRow():Row {return this.scope.lookup(':currentRow');}
 	// function set_currentRow(v: Row):Row {return this.scope.assign(':currentRow', currentRow);}
 
-	inline function _init() {
+	function _init() {
 		// this.scope.define(':currentRow', null);
 
 		inline function f(name, o) {
@@ -336,12 +374,128 @@ class Context<TDb, Table, Row> {
 		}));
 	}
 
-	public inline function focus(row:Row) {
-		this.currentRow = row;
+	inline function get_querySources() {
+		return mSrcStack.top();
+	}
+
+	/**
+	 * find in the source-stack
+	 */
+	function ssiter(f: TableSpec -> Bool) {
+		for (scope in mSrcStack)
+			for (t in scope)
+				if (!f(t))
+					break;
+	}
+
+	public function pushSourceScope(srcs: Array<TableSpec>) {
+		mSrcStack.push(srcs);
 		return this;
 	}
 
+	public function popSourceScope() {
+		mSrcStack.pop();
+		return this;
+	}
+
+	public function addQuerySource(src: TableSpec) {
+		var qs = mSrcStack.top();
+		for (i in 0...qs.length) {
+			var qs = qs[i];
+			if (qs == src) 
+				return this;
+			if (qs.name == src.name) {
+				mergeSpecs(qs, src);
+				return this;
+			}
+		}
+
+		qs.push(src);
+		return this;
+	}
+
+	function mergeSpecs(target:TableSpec, other:TableSpec) {
+		if (target.name != other.name) throw new pm.Error('Naming mismatch');
+		if (other.schema != target.schema) target.schema = other.schema;
+		if (other.table != target.table) target.table = nor(target.table, other.table);
+	}
+
+	@:generic
+	static function has2d<T, A:Iterable<T>, A2d:Iterable<A>>(container:A2d, value:T, ?eq:T->T->Bool):Bool {
+		eq = nor(eq, Functions.equality);
+		var r = false;
+		for (it in container)
+			for (x in it) {
+				if (eq(x, value)) {
+					r = true;
+					break;
+				}
+				
+				Console.debug(x);
+			}
+		return r;
+	}
+
+	@:noCompletion
+	public var unaryCurrentRow:Bool = false;
+
+	public function use(src: TableSpec) {
+		final src = src.unwrap();
+		if (!has2d(mSrcStack, src, (x, y) -> (x.name == y.name)))
+			throw new pm.Error('${src.name} not found');
+		else
+			Console.debug(src);
+		currentDefaultTable = src.name;
+		
+		return this;
+	}
+
+	public function focus(row:Row, ?tableName:String) {
+		if (unaryCurrentRow) {
+			currentRow = row;
+			return this;
+		}
+
+		tableName = tableName.nor(currentDefaultTable);
+		if (tableName == null)
+			throw new pm.Error('source name must be provided either explicitly or by means of Context.currentDefaultTable');
+
+		currentRows[tableName] = row;
+		
+		return this;
+	}
+
+	public function getCurrentRow(?tableName: String):Row {
+		if (unaryCurrentRow) {
+			return this.currentRow;
+		}
+
+		tableName = tableName.nor(currentDefaultTable);
+		if (tableName == null)
+			throw new pm.Error('source name must be provided either explicitly or by means of Context.currentDefaultTable');
+
+		return currentRows[tableName];
+	}
+
+	public function multipleSources():Bool {
+		return querySources.length > 1;
+	}
+
+	// private inline function get_currentRow():Row {
+	// 	if (currentDefaultTable == null) {
+	// 		return this.currentRow;
+	// 	}
+	// 	else {
+	// 		Console.examine(currentDefaultTable);
+	// 		return this.currentRows[this.currentDefaultTable];
+	// 	}
+	// }
+	// private function set_currentRow(row: Row):Row {
+		
+	// }
+
 	public function get(name:SqlSymbol):Null<Dynamic> {
+		return innerGet(name.identifier);
 		if (name.type.match(Unknown)) {
 			return innerGet(name.identifier);
 		} else {
@@ -371,54 +525,54 @@ class Context<TDb, Table, Row> {
 	}
 
 	private function innerGetTypeAware(name:SqlSymbol):Null<Dynamic> {
-		switch name.type {
-			case Unknown:
-				throw new pm.Error.WTFError();
+		// switch name.type {
+		// 	case Unknown:
+		// 		throw new pm.Error.WTFError();
 			
-			// case Variable:
-			// 	final varn = name.identifier;
-			// 	if (scope.isDeclared(varn)) {
-			// 		var value = scope.lookup(varn);
-			// 		if (TypedValue.is(value)) {
-			// 			var value:TypedValue = value;
-			// 			return value;
-			// 		}
-			// 		else {
-			// 			throw new pm.Error('Expected TypedValue', 'TypeError');
-			// 		}
-			// 	}
-			// 	throw new pm.Error('Not found "$varn"');
+		// 	// case Variable:
+		// 	// 	final varn = name.identifier;
+		// 	// 	if (scope.isDeclared(varn)) {
+		// 	// 		var value = scope.lookup(varn);
+		// 	// 		if (TypedValue.is(value)) {
+		// 	// 			var value:TypedValue = value;
+		// 	// 			return value;
+		// 	// 		}
+		// 	// 		else {
+		// 	// 			throw new pm.Error('Expected TypedValue', 'TypeError');
+		// 	// 		}
+		// 	// 	}
+		// 	// 	throw new pm.Error('Not found "$varn"');
 
-			// case Function:
-			// 	final fname = name.identifier;
-			// 	if ()
+		// 	// case Function:
+		// 	// 	final fname = name.identifier;
+		// 	// 	if ()
 			
-			case Field | Function | Variable:
-				throw new pm.Error('Unhandled $name');
-			case Table:
-				if (name.table != null) {
-					return name.table;
-				}
-				else if (tables.exists(name.identifier)) {
-					var tbl = tables[name.identifier];
-					name.table = tbl;
-					return tbl;
-				}
-				else {
-					// trace(this.database, name.identifier);
-					var tbl = glue.dbLoadTable(this.database, name.identifier);
-					name.table = tbl;
-					return tbl;
-				}
-				throw new pm.Error('Not Found');
-			// case Field:
-			// case Variable:
-			case Alias:
-				if (aliases.isDeclared(name.identifier)) {
-					return get(aliases.lookup(name.identifier));
-				}
-				// case Function:
-		}
+		// 	case Field | Function | Variable:
+		// 		throw new pm.Error('Unhandled $name');
+		// 	case Table:
+		// 		if (name.table != null) {
+		// 			return name.table;
+		// 		}
+		// 		else if (tables.exists(name.identifier)) {
+		// 			var tbl = tables[name.identifier];
+		// 			name.table = tbl;
+		// 			return tbl;
+		// 		}
+		// 		else {
+		// 			// trace(this.database, name.identifier);
+		// 			var tbl = glue.dbLoadTable(this.database, name.identifier);
+		// 			name.table = tbl;
+		// 			return tbl;
+		// 		}
+		// 		throw new pm.Error('Not Found');
+		// 	// case Field:
+		// 	// case Variable:
+		// 	case Alias:
+		// 		if (aliases.isDeclared(name.identifier)) {
+		// 			return get(aliases.lookup(name.identifier));
+		// 		}
+		// 		// case Function:
+		// }
 		throw new pm.Error.WTFError();
 	}
 
@@ -444,21 +598,172 @@ class Context<TDb, Table, Row> {
 		// throw new pm.Error.NotImplementedError();
 		return Doc.unsafe(row).get(name);
 	}
+
+	public function getColumnField(column:String, ?table:String) {
+		if (table != null) {
+			var schema = getTableSchema(table);
+			if (schema == null) return null;
+			return schema.column(column);
+		}
+		else {
+			for (src in querySources) {
+				if (src.schema != null) {
+					var c = src.schema.column(column);
+					if (c != null)
+						return c;
+				}
+			}
+		}
+		throw new pm.Error(if (table != null) '$table.$column' else column, 'NotFound');
+	}
+
+	public function getTableSchema(?table: String) {
+		var src = getSource(table);
+		return src != null ? src.schema : null;
+	}
+
+	private function connectSource(t:TableSpec):TableSpec {
+		if (t.src != null && !mSrcStack.top().has(t.src))
+			addQuerySource(t.src);
+		return t;
+	}
+
+	public function getSource(?n:String):Null<TableSpec> {
+		if (n == null) {
+			switch querySources {
+				case [src]:
+					connectSource(src);
+					return src;
+
+				default:
+					throw new pm.Error('Unhandled');
+			}
+		}
+
+		for (scope in mSrcStack) for (src in scope) {
+			if (src.name == n) {
+				connectSource(src);
+
+				if (!tables.exists(src.name) && src.table != null)
+					tables[src.name] = src.table;
+				
+				return src;
+			}
+		}
+
+		if (tables.exists(n)) {
+			var tbl = tables.get(n);
+			assert(glue.valIsTable(tbl), new pm.Error('$tbl is not a Table pointer'));
+
+			var schema = glue.tblGetSchema(tbl);
+			
+			var spec = new TableSpec(n, schema, {table:tbl});
+			// spec.table = tbl;
+			addQuerySource(spec);
+
+			return spec;
+		}
+
+		try {
+			var table = glue.dbLoadTable(this.database.unwrap(), n).unwrap();
+			tables.set(n, table);
+			var schema = glue.tblGetSchema(table);
+			var spec = new TableSpec(n, schema, {table:table});
+			// spec.table = table;
+			addQuerySource(spec);
+
+			return getSource(n);
+		}
+		catch (e: Dynamic) {
+			Console.error(e);
+		}
+
+		throw new pm.Error(n, 'NotFound');
+	}
+
+	public function resolveTableFrom(r: Dynamic):Null<Table> {
+		if (r == null) return null;
+		if (glue.valIsTable(r)) return cast r;
+
+		if ((r is TableSpec)) {
+			var t:TableSpec = cast r;
+			t.table = resolveTableFrom(t.table);
+			return t.table;
+		}
+
+		if ((r is String)) {
+			var s:String = cast r;
+			try {
+				var src = getSource(s).unwrap();
+				return resolveTableFrom(src);
+			}
+			catch (error: pm.Error) {
+				if (error.name == 'NotFound' || error.name == 'NullIsBadError') {
+					throw new pm.Error(s, 'NotFound');
+				}
+				throw error;
+			}
+		}
+
+		throw new pm.Error('Cannot resolve table from ${Type.typeof(r)}', 'ResolutionFailed');
+	}
+
+
+}
+
+@:tink 
+class NodeContext<Ctx:Context<Dynamic, Dynamic, Dynamic>> extends Context<Dynamic, Dynamic, Dynamic> {
+	@:forward
+	public final parent: Ctx;
+
+	public function new(parent:Ctx, ?glue) {
+		super(glue != null ? glue : parent.glue);
+		
+		this.parent = parent;
+	}
+
+	override function getSource(?n:String):Null<TableSpec> {
+		return try super.getSource(n) catch (e: pm.Error) parent.getSource(n);
+	}
+	override function resolveTableFrom(r:Dynamic):Null<Dynamic> {
+		return super.resolveTableFrom(r);
+	}
+	override function addQuerySource(src:TableSpec):Context<Dynamic, Dynamic, Dynamic> {
+		return super.addQuerySource(src);
+	}
+}
+
+class Variable<T> {
+	public final scope: Scope<T>;
+	public final type: SType;
+	public var value: T;
+
+	public function new(scope, type, ?value) {
+		this.scope = scope;
+		this.type = type;
+		this.value = value;
+	}
 }
 
 class Scope<T> {
 	public var parent:Null<Scope<T>>;
-	public var declared:Map<String, T>;
+	public var declared:Map<String, /* Variable<T> */T>;
 
 	public function new(?parent) {
 		this.declared = new Map();
 		this.parent = parent;
 	}
 
+	private function createVar(t:SType, ?v:T):Variable<T> {
+		return new Variable(this, t, v);
+	}
+
 	public function lookupLocal(name):Null<T> {
 		if (declared.exists(name)) {
-			return declared[name];
-		} else {
+			var variable = declared.get(name);//.unwrap(new pm.Error('name \'$name\' is not defined'));
+			return variable;
+		} 
+		else {
 			return null;
 		}
 	}
@@ -468,7 +773,7 @@ class Scope<T> {
 			return declared[name] = value;
 		}
 		else {
-			throw new pm.Error('Name $name is not defined in this Scope');
+			throw new NameError(name);
 		}
 	}
 
@@ -477,7 +782,7 @@ class Scope<T> {
 			case null:
 				return switch parent {
 					case null:
-						return null;
+						throw new NameError(name);
 
 					default:
 						return parent.lookup(name);
@@ -496,14 +801,16 @@ class Scope<T> {
 			return parent.assign(name, value);
 		}
 		else {
-			throw new pm.Error('Name $name is not defined in this Scope');
+			// throw new pm.Error('Name $name is not defined in this Scope');
+			throw new NameError(name);
 		}
 	}
 
 	public function define(name, value:T) {
 		if (declared.exists(name)) {
 			throw new pm.Error('$name already defined in this scope');
-		} else {
+		} 
+		else {
 			declared[name] = value;
 		}
 	}
@@ -511,11 +818,90 @@ class Scope<T> {
 	public function isDeclared(name):Bool {
 		if (declared.exists(name)) {
 			return true;
-		} else if (parent != null) {
+		} 
+		else if (parent != null) {
 			return parent.isDeclared(name);
-		} else {
+		} 
+		else {
 			return false;
 		}
+	}
+
+	public function isDeclaredLocally(name):Bool {
+		return declared.exists(name);
+	}
+
+	function freeLocal(name) {
+		if (declared.exists(name)) {
+			//TODO
+			return declared.remove(name);
+		}
+		return false;
+	}
+
+	function free(name) {
+		if (freeLocal(name))
+			return true;
+		else if (parent != null)
+			return parent.free(name);
+		else
+			return false;
+	}
+}
+
+/**
+```haxe
+	//!should be named
+	class SelectSourceHandle {...}
+```
+ */
+class TableSpec {
+	public var name:String;
+	public var schema:SqlSchema<Dynamic>;
+	public var stream: TableStream;
+	//// public var alias:Null<String> = null;
+	public var table:Null<Dynamic> = null;
+	public var stmt:Null<SelectStmt> = null;
+	public var src(default, set): Null<TableSpec> = null;
+
+	// public var
+	public function new(name, schema, data:{?stream:TableStream, ?stmt:SelectStmt, ?src:TableSpec, ?table:Dynamic}) {
+		this.name = name;
+		this.schema = schema;
+		this.stream = data.stream;
+		
+		if (data.src != null) src = data.src;
+		if (data.stmt != null) stmt = data.stmt;
+		if (data.table != null) table = data.table;
+
+		// switch data {
+		// 	case {stmt: null, table: null}:
+		// 		Console.examine(stream);
+		// 	case {stmt:q, table:_} if (q != null):
+		// 		nestedQuery = q;
+		// 	case {table:table}:
+		// 		this.table = table;
+		// }
+	}
+
+	private function set_src(v: Null<TableSpec>) {
+		if (this == v)
+			throw new pm.Error('Infinite loop created');
+		return this.src = v;
+	}
+
+	public function toString():String {
+		var s = 'TableSpec("$name", source=';
+		s += switch this {
+			case {src:null, table:null, stream:null}: '??';
+			case {src:_, table:null, stream:null}: 'Alias($src)';
+			case {src:null, table:_, stream:null}: 'Table';
+			case {src:null, table:null, stream:_}: 'NestedSelectStmt';
+			default:
+				throw new pm.Error('Unreachable');
+		}
+		s += ')';
+		return s;
 	}
 }
 
@@ -591,11 +977,23 @@ class DummyGlue<Row> extends Glue<ql.sql.Dummy.AbstractDummyDatabase<ql.sql.Dumm
 	override function tblGetSchema(table: ql.sql.Dummy.DummyTable<Row>):SqlSchema<Row> {
 		return table.schema;
 	}
+
+	override function valIsTable(v:Dynamic):Bool {
+		return (v is ql.sql.DummyTable<Dynamic>);
+	}
 }
 
 class DummyContext<Row> extends Context<Dynamic/*ql.sql.Dummy.AbstractDummyDatabase<ql.sql.Dummy.DummyTable<Row>, Row>*/, ql.sql.Dummy.DummyTable<Row>, Row> {
 	public function new(db) {
 		super(new DummyGlue(db));
 		this.database = db;
+	}
+}
+
+class NameError extends pm.Error {
+	public final id: String;
+	public function new(id, ?pos) {
+		super('name \'$id\' is not defined', 'NameError', pos);
+		this.id = id;
 	}
 }
