@@ -3,16 +3,17 @@ package ql.sql.common.internal;
 import pmdb.core.Object;
 
 @:forward
-abstract ObjectPure<T>(Null<Node<T>>) from Null<Node<T>> to Null<Node<T>> {
+@:using(ql.sql.common.internal.ImmutableStructs)
+abstract ImmutableStruct<T>(Null<Node<T>>) from Null<Node<T>> to Null<Node<T>> {
 	public inline function new() {
 		this = null;
 	}
 
-	public inline function append(k:String, v:T):ObjectPure<T> {
+	public inline function append(k:String, v:T):ImmutableStruct<T> {
 		return this.append(k, v);
 	}
 
-	public inline function compact():ObjectPure<T> {
+	public inline function compact():ImmutableStruct<T> {
 		return this = this.compact();
 	}
 
@@ -32,8 +33,8 @@ abstract ObjectPure<T>(Null<Node<T>>) from Null<Node<T>> to Null<Node<T>> {
 		return value;
 	}
 
-	public inline function map<O>(f: (key:String, value:T)->{key:String, value:O}):ObjectPure<O> {
-		var res:ObjectPure<O> = new ObjectPure();
+	public inline function map<O>(f: (key:String, value:T)->{key:String, value:O}):ImmutableStruct<O> {
+		var res:ImmutableStruct<O> = new ImmutableStruct();
 		for (key=>value in this) {
 			var pair = f(key, value);
 			res[pair.key] = pair.value;
@@ -82,10 +83,10 @@ class Node<T> {
 		return Nodes.look_up(this, key);
 	}
 
-	public function nodes() {
+	public inline function nodes() {
 		return Nodes.createNodeIterator(this);
 	}
-	public function keyValueIterator() {
+	public inline function keyValueIterator() {
 		return nodes();
 	}
 }
