@@ -1,5 +1,6 @@
 package ql.sql.common;
 
+import pm.utils.Uuid;
 import ql.sql.runtime.TAst.JITFn;
 import ql.sql.runtime.TAst.TExpr;
 import pmdb.core.ds.Incrementer;
@@ -42,7 +43,7 @@ using haxe.macro.ExprTools;
 class SqlSchema<Row> {
     public final mode: SchemaMode;
     public final fields: SchemaFields;
-    public final indexes: ReadOnlyArray<SchemaIndex>;
+    public final indexing: Null<SchemaIndexes>;
 
     public final primaryKey: Null<SchemaField>;
     public final incrementers: Null<Dictionary<Incrementer>>;
@@ -58,15 +59,21 @@ class SqlSchema<Row> {
 
         this.context = state.context;
         this.mode = getInitMode(state.mode);
-        this.indexes = new Array();
         this.incrementers = new Dictionary();
         var fieldList = getInitFields(state.fields).map(initSchemaField);
-
+        var m = new Map();
+        for (f in fieldList) {
+            if (!m.exists(f.name))
+                m[f.name] = true;
+            else
+                throw new pm.Error('Duplicate column-declarations not allowed');
+        }
         this.fields = new SchemaFields(this, fieldList);
         this.primaryKey = switch this.fields.primary {
             case null: null;
             case f: f.field;
         };
+        this.indexing = if (state.indexes == null) null else new SchemaIndexes(this, getInitIndexes(this, state.indexes));
     }
 
     public function column(name: String):SchemaField {
@@ -166,7 +173,7 @@ class SqlSchema<Row> {
                 }
             }
             else if (field.notNull) {
-                errors.push(new Error('Field `${field.name}` missing from structure'));
+				errors.push(new Error('${row} is missing field `${field.name}`'));
                 continue;
             }
             else {
@@ -219,7 +226,8 @@ class SqlSchema<Row> {
         var row:Doc = new Doc();
 		final doc:Doc = Doc.unsafe(o);
 		// var errors:Array<Error> = [];
-        var rowFields = new set.StringSet(doc.keys());
+        var rowFields = [for (k in doc.keys()) k=>0];
+		// Console.debug(fields.fields.map(f -> f.name));
         
         inline function handleNull(field: SchemaField) {
             final name = field.name;
@@ -233,14 +241,18 @@ class SqlSchema<Row> {
                 throw new Error('default-value expression not compiled');
             }
             else {
-				throw(new Error('Field `${field.name}` missing from structure'));
+				throw(new Error('${o} is missing field `${field.name}`'));
 			}
         }
 
 		for (field in fields) {
 			final name = field.name;
-			if (rowFields.exists(name)) {
-				rowFields.remove(name);
+			if (rowFields.exists(name) ) {
+                rowFields[name] += 1;
+                var rname = name;
+                if (rowFields[name] > 1)
+                    rname += rowFields[name];
+                
 				var value:Dynamic = doc.get(name);
 
 				if (value == null && (field.notNull)) {
@@ -251,7 +263,7 @@ class SqlSchema<Row> {
                     continue;
                 }
 
-                row[name] = field.type.importValue(value);
+                row[rname] = field.type.importValue(value);
             } 
             else if (field.notNull) {
                 handleNull(field);
@@ -479,6 +491,20 @@ class SqlSchema<Row> {
         }
     }
 
+    static function getInitIndexes(owner:SqlSchema<Dynamic>, indexes:Array<SchemaIndexInit>):Null<Array<SchemaIndex>> {
+        if (owner.mode != RowMode)
+            throw new pm.Error('Indexing not supported for this kind of schema');
+
+        var inits = indexes;
+        var indexes:Array<SchemaIndex> = new Array();
+
+        for (init in inits) {
+            indexes.push(new SchemaIndex(init));
+        }
+
+        return indexes;
+    }
+
     public static function fromClass<T>(type: Class<T>):SqlSchema<T> {
         if (!Rtti.hasRtti(type)) throw new pm.Error('Class must be flagged with the @:rtti metadata');
         var rtti = haxe.rtti.Rtti.getRtti(type);
@@ -517,6 +543,8 @@ class SqlSchema<Row> {
                     default: 
                 }
 
+                var idx = false;
+
                 for (entry in field.meta) {
                     switch entry.name {
                         case 'notNull', 'sql.notNull':
@@ -531,12 +559,27 @@ class SqlSchema<Row> {
                         case 'default', 'defaultTo', 'sql.default', 'sql.defaultTo':
                             column.defaultValue = entry.params[0];
 
+                        case 'index', ':index':
+                            idx = true;
+
                         default:
                     }
                 }
 
                 if (!typeHandled)
                     column.type = STypes.fromCType(field.type);
+
+                if (idx) {
+					init.indexes = nor(init.indexes, new Array());
+					init.indexes.push({
+						label: field.name,
+						extractor: null,
+						path: field.name,
+						type: column.type,
+						sparse: !column.notNull,
+						unique: column.unique
+					});
+                }
 
                 if (!exclude) 
                     (cast init.fields : Array<SchemaFieldInit>).push(column);
@@ -634,7 +677,16 @@ class SqlSchema<Row> {
         
 		if (idx) {
             // schema.indexes.push({name: f.name});
-            Console.error('Indexing needs implementing!');
+            // Console.error('Indexing needs implementing!');
+            schema.indexes = nor(schema.indexes, new Array());
+            schema.indexes.push({
+                label: f.name,
+                extractor: null,
+                path: f.name,
+                type: column.type,
+                sparse: !column.notNull,
+                unique: column.unique
+            });
         }
 
         (cast schema.fields : Array<SchemaFieldInit>).push(column);
@@ -710,6 +762,8 @@ typedef SchemaFieldInit = {
 };
 
 typedef SchemaIndexInit = {
+    ?label: String,
+    ?extractor: Doc->Dynamic,
     ?path: String,
     ?type: SType,
     ?sparse: Bool,
@@ -838,20 +892,60 @@ class Constructor {
     }
 }
 
+@:allow(ql.sql.runtime.Compiler)
 class SchemaIndex {
-    public var pathName: String;
-    // public final path: ql.sql.common.DotPath;
+    public final hashKey:UInt;
+    public var label: String;
+    public var extractor: Doc -> Dynamic;
     public var keyType: SType;
     public var sparse: Bool;
     public var unique: Bool;
+    public var ttl: Null<Float> = null;
+
+    private var extractorSql:Null<String> = null;
+    private var extractorExpr:Null<TExpr> = null;
 
     public function new(init: SchemaIndexInit) {
-        this.pathName = init.path;
+        var pathName = init.path;
+
+        this.label = nor(init.label, pathName.nor(''));
+        if (this.label.length != 0)
+            this.hashKey = pm.strings.HashCode.java(label);
+        else
+            this.hashKey = pm.HashKey.next();
+
         this.keyType = init.type.nor(TUnknown);
         this.sparse = init.sparse.nor(false);
         this.unique = init.unique.nor(false);
-        // this.path = this.pathName;
+
+        this.extractor = function(o):Dynamic {
+            return o[this.label];
+        }
+
+        if (!pathName.empty()) {
+            this.extractorSql = pathName;
+            if (label.empty())
+                this.label = pathName;
+        }
+        else if (label.empty()) {
+            this.label = Uuid.create();
+        }
     }
+}
+
+class SchemaIndexes {
+    private final schema: SqlSchema<Dynamic>;
+    private final idxm: Map<String, SchemaIndex>;
+    
+    public final indexes: ReadOnlyArray<SchemaIndex>;
+
+    public function new(owner, indexes:Array<SchemaIndex>) {
+        this.schema = owner;
+        this.indexes = indexes;
+        this.idxm = [for (idx in indexes) idx.label => idx];
+    }
+    
+    public inline function index(n: String):SchemaIndex return idxm[n].unwrap();
 }
 
 enum SchemaMode {
