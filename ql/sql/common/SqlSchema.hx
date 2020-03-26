@@ -74,6 +74,12 @@ class SqlSchema<Row> {
             case f: f.field;
         };
         this.indexing = if (state.indexes == null) null else new SchemaIndexes(this, getInitIndexes(this, state.indexes));
+
+        for (field in fields) {
+            if (field.autoIncrement) {
+                incrementers[field.name] = new Incrementer();
+            }
+        }
     }
 
     public function column(name: String):SchemaField {
@@ -100,7 +106,7 @@ class SqlSchema<Row> {
             case Success(true): true;
             case Failure(errors):
                 #if debug
-                Console.error(errors);
+                //Console.error(errors);
                 #end
                 false;
             case Success(false):
@@ -135,7 +141,7 @@ class SqlSchema<Row> {
     public function test(row:Row, mutate:Bool=false):Outcome<Bool, Array<Error>> {
 		var doc:Doc = Doc.unsafe(row);
         var errors:Array<Error> = [];
-        var rowFields = new set.StringSet(doc.keys());
+        var rowFields = new pm.map.StringSet(doc.keys());
 
         for (field in fields) {
             final name = field.name;
@@ -232,6 +238,7 @@ class SqlSchema<Row> {
         inline function handleNull(field: SchemaField) {
             final name = field.name;
 			if (field.autoIncrement && this.incrementers.exists(name)) {
+                // Console.debug(name);
 				row[name] = incrementers[name].next();
             }
             else if (field.defaultValueExpr != null) {
@@ -393,34 +400,35 @@ class SqlSchema<Row> {
      * @return Row
      */
     public function prepareForInsertion(row: Row):Row {
-        var copy:Doc = new Doc();
-        var doc:Doc = Doc.unsafe(row);
+        return induct(row);
+        // var copy:Doc = new Doc();
+        // var doc:Doc = Doc.unsafe(row);
         
-        for (field in fields) {
-            var value:Dynamic = doc[field.name];
-            if (field.notNull && value == null) {
-                switch field {
-                    case {autoIncrement:true}:
-                        throw new Error('TODO');
+        // for (field in fields) {
+        //     var value:Dynamic = doc[field.name];
+        //     if (field.notNull && value == null) {
+        //         switch field {
+        //             case {autoIncrement:true}:
+        //                 throw new Error('TODO');
 
-                    default:
-                }
+        //             default:
+        //         }
 
-                throw new ValueError(doc, 'Missing column ${field.name}:${field.type} in ${''+doc}');
-            }
-            else if (value == null) {
-                copy[field.name] = null;
-                continue;
-            }
+        //         throw new ValueError(doc, 'Missing column ${field.name}:${field.type} in ${''+doc}');
+        //     }
+        //     else if (value == null) {
+        //         copy[field.name] = null;
+        //         continue;
+        //     }
 
-            // if (!field.type.validateValue(value)) {
-            //     value = field.type.importValue(value);
-            // }
+        //     // if (!field.type.validateValue(value)) {
+        //     //     value = field.type.importValue(value);
+        //     // }
 
-            copy[field.name] = field.type.importValue(value);
-        }
+        //     copy[field.name] = field.type.importValue(value);
+        // }
 
-        return convertDocToRow(copy);
+        // return convertDocToRow(copy);
     }
 
     /**

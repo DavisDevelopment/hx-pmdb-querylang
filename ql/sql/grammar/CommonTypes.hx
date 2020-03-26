@@ -112,6 +112,11 @@ enum NullLiteral {
 	NOT_NULL;
 }
 
+enum FunctionKind {
+	Simple;
+	Aggregate;
+}
+
 /*=  string | number | boolean | NullLiteral */
 // typedef ConstantType = Or4<String, Or<Int, Float>, Bool, NullLiteral>;
 enum ConstantType {
@@ -214,6 +219,21 @@ enum JoinType {
 	Cross;
 	OuterLeft;
 	OuterRight;
+}
+
+enum KeyFormat {
+	Key;
+	Index;
+}
+enum IndexHintAction {
+	Use;
+	Ignore;
+	Force;
+}
+enum IndexHintType {
+	Join;
+	OrderBy;
+	GroupBy;
 }
 
 /**
@@ -342,4 +362,14 @@ interface IStmt<Result> {
 	}
 
 	public function eval():Result;
+}
+
+class TablePath {
+	public final name:String;
+	public final pack:Null<Array<String>> = null;
+
+	public function new(name, ?pack) {
+		this.name = name;
+		this.pack = pack;
+	}
 }

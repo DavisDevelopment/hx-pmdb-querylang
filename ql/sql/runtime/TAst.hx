@@ -1,7 +1,8 @@
 package ql.sql.runtime;
 
+import pm.OneOrMany;
 import haxe.extern.EitherType;
-import ql.sql.runtime.VirtualMachine.F;
+import ql.sql.runtime.Callable.F;
 import haxe.macro.Expr as HaxeExpr;
 import haxe.macro.Expr.ExprOf as HaxeExprOf;
 import pmdb.ql.ts.DataType;
@@ -13,13 +14,14 @@ import haxe.ds.Option;
 using pm.Options;
 
 import ql.sql.grammar.CommonTypes.SqlSymbol;
-import ql.sql.grammar.expression.Expression.Function;
-import ql.sql.grammar.expression.Expression.FunctionKind;
+// import ql.sql.grammar.expression.Expression.Function;
+// import ql.sql.grammar.expression.Expression.FunctionKind;
+
 import ql.sql.grammar.CommonTypes.BinaryOperator;
 import ql.sql.grammar.CommonTypes.UnaryOperator;
 import ql.sql.grammar.CommonTypes.Contextual;
 
-import ql.sql.runtime.VirtualMachine.Context;
+import ql.sql.runtime.VirtualMachine;
 import haxe.Constraints.IMap;
 import pm.Helpers.nn;
 import pm.Helpers.nor;
@@ -47,6 +49,51 @@ class CSelOut {
     public inline function hasSchema():Bool {
         return schema != null;
     }
+
+	/**
+	 * given a `Context<?,?,?>` instance, build the output row
+	 * @param c
+	 * @return Doc
+	 */
+	public function build<Row>(c:Context<Dynamic, Dynamic, Row>):Doc {
+		var output:Doc = new Doc();
+
+		for (item in this.items) {
+			switch item {
+				case Column(table, column, alias):
+					var value = c.glue.rowGetColumnByName(c.getCurrentRow(table.label()), column.identifier);
+					if (alias == null) {
+						output[column.identifier] = value;
+					} else {
+						output[alias.identifier] = value;
+					}
+
+				case All(null | {identifier: null}):
+					var input:Doc = Doc.unsafe(c.getCurrentRow());
+					for (f => value in input) {
+						output[f] = value;
+					}
+
+				case All(table):
+					var n = table.label();
+					var schema = c.getTableSchema(n);
+					for (col in schema.fields) {
+						var value = Doc.unsafe(c.getCurrentRow(n)).get(col.name);
+						output[col.name] = value;
+					}
+
+				case Expression(alias, e):
+					var value = e.eval({context: c});
+					if (alias == null) {
+						throw new pm.Error('TODO: AST printing');
+					} else {
+						output[alias.identifier] = value;
+					}
+			}
+		}
+
+		return output;
+	}
 }
 
 /**
@@ -57,53 +104,6 @@ abstract SelOutput (CSelOut) from CSelOut to CSelOut {
     /* Constructor */
     public function new(items) {
         this = new CSelOut(items);
-    }
-
-    /**
-     * given a `Context<?,?,?>` instance, build the output row
-     * @param c 
-     * @return Doc
-     */
-    public function build<Row>(c: Context<Dynamic, Dynamic, Row>):Doc {
-        var output:Doc = new Doc();
-
-        for (item in this.items) {
-            switch item {
-                case Column(table, column, alias):
-                    var value = c.glue.rowGetColumnByName(c.getCurrentRow(table.label()), column.identifier);
-                    if (alias == null) {
-                        output[column.identifier] = value;
-                    }
-                    else {
-                        output[alias.identifier] = value;
-                    }
-
-                case All(null|{identifier:null}):
-                    var input:Doc = Doc.unsafe(c.getCurrentRow());
-                    for (f=>value in input) {
-                        output[f] = value;
-                    }
-
-                case All(table):
-                    var n = table.label();
-                    var schema = c.getTableSchema(n);
-                    for (col in schema.fields) {
-                        var value = Doc.unsafe(c.getCurrentRow(n)).get(col.name);
-                        output[col.name] = value;
-                    }
-
-                case Expression(alias, e):
-                    var value = e.eval({context:c});
-                    if (alias == null) {
-                        throw new pm.Error('TODO: AST printing');
-                    }
-                    else {
-                        output[alias.identifier] = value;
-                    }
-            }
-        }
-
-        return output;
     }
 
     public function iterator():Iterator<SelItem> {
@@ -121,6 +121,11 @@ abstract SelOutput (CSelOut) from CSelOut to CSelOut {
     }
 }
 
+/**
+ * SelPredicate class
+ * TODO rename to Term
+ *  @see https://www.sqlite.org/optoverview.html
+ */
 class SelPredicate {
     public var type: SelPredicateType;
     public var mCompiled:Null<JITFn<Bool>> = null;
@@ -152,6 +157,10 @@ class SelPredicate {
         }
     }
 
+    public function clone():SelPredicate {
+        return new SelPredicate(type.clone());
+    }
+
     public static function And(l:SelPredicate, r:SelPredicate):SelPredicate {
         var t = SelPredicateType;
         var type = switch l.type {
@@ -163,6 +172,7 @@ class SelPredicate {
         }
         return new SelPredicate(type);
     }
+
 	public static function Or(l:SelPredicate, r:SelPredicate):SelPredicate {
 		var t = SelPredicateType;
 		var type = switch l.type {
@@ -176,6 +186,7 @@ class SelPredicate {
 	}
 }
 
+@:using(ql.sql.runtime.TAst.TermTypes)
 enum SelPredicateType {
     Rel(relation: RelationalPredicate);
     // And(left:SelPredicate, right:SelPredicate);
@@ -183,6 +194,16 @@ enum SelPredicateType {
     And(p: Array<SelPredicate>);
     Or(p: Array<SelPredicate>);
     Not(negated: SelPredicate);
+}
+class TermTypes {
+    public static inline function clone(t: SelPredicateType):SelPredicateType {
+        return switch t {
+            case Rel(relation): Rel(relation.clone());
+            case And(p): And([for (sub in p) sub.clone()]);
+            case Or(p): Or([for (sub in p) sub.clone()]);
+            case Not(negated): Not(negated.clone());
+        }
+    }
 }
 
 typedef IRNode<F:haxe.Constraints.Function> = {
@@ -238,6 +259,10 @@ class RelationalPredicate extends ARel<TExpr, TExpr> {
         return mOpCompiled(l, r);
     }
 
+    public function clone():RelationalPredicate {
+        return new RelationalPredicate(op, left.clone(), right.clone());
+    }
+
 	public function bindParameters(params:EitherType<Array<Dynamic>, Map<String, Dynamic>>) {
         left.bindParameters(params);
         right.bindParameters(params);
@@ -287,7 +312,7 @@ class TExpr {
         }
     }
 
-    public function eval(g: Contextual):Dynamic {
+    public dynamic function eval(g: Contextual):Dynamic {
         if (mConstant != null) return mConstant;
         if (mCompiled != null) return mCompiled(g);
 
@@ -365,7 +390,11 @@ class TExpr {
                 }
 
 			case TField(o, _):
-				o.bindParameters(mapping, true);
+                o.bindParameters(mapping, true);
+                
+            case TArray(a, idx):
+                a.bindParameters(mapping);
+                idx.bindParameters(mapping);
 
 			case TCall(f, params):
 				f.bindParameters(mapping, true);
@@ -384,6 +413,7 @@ class TExpr {
 					v.bindParameters(mapping, true);
 
 			case _:
+                //
 		}
 
 		return this;
@@ -391,11 +421,63 @@ class TExpr {
 
 	function bindParameterOnto(label:String, offset:Int, key:EitherType<Int, String>, value:Dynamic) {
 		if ((key is String) && label == key) {
+            //Console.examine(label, value);
 			this.mConstant = value;
         } 
         else if ((key is Int) && offset == key) {
 			this.mConstant = value;
 		}
+    }
+
+    public function getChildNodes():Array<TExpr> {
+        var res = [];
+        inline function add(e: OneOrMany<TExpr>) {
+            for (e in e.asMany())
+                res.push(e);
+        }
+
+        switch expr {
+            case TConst(value):
+            case TReference(name):
+            case TParam(name):
+            case TTable(name):
+            case TColumn(name, table):
+            case TField(o, field):
+                add(o);
+            case TArray(arr, index):
+                add([arr, index]);
+            case TFunc(f):
+            case TCall(f, params):
+                add(f);
+                add(params);
+            case TBinop(op, left, right):
+                add([left, right]);
+            case TUnop(_, _, e):
+                add(e);
+            case TArrayDecl(values):
+                add(values);
+            case TObjectDecl(fields):
+                for (f in fields)
+                    add(f.value);
+            case TCase(type):
+                switch type {
+                    case Expr:
+                        //
+                    case Standard(branches, defaultExpr):
+                        for (b in branches) {
+                            // add(b.e);
+                            add(b.result);
+                        }
+                        if (defaultExpr != null)
+                            add(defaultExpr);
+                }
+        }
+
+        return res;
+    }
+
+    public function clone():TExpr {
+        return new TExpr(expr.clone());
     }
 }
 
@@ -414,47 +496,140 @@ enum TExprType {
     TTable(name: Sym);
     TColumn(name:Sym, table:Sym);
     TField(o:TExpr, field:Sym);
+    TArray(arr:TExpr, index:TExpr);
 
     /**
       an expression which references a built-in function by name, complete with type information
      **/
-    TFunc(f:TFunction);
+    // TFunc(f: TFunction);
+    TFunc(f: {id:String, f:Callable});
     TCall(f:TExpr, params:Array<TExpr>);
     TBinop(op:BinaryOperator, left:TExpr, right:TExpr);
     TUnop(op:UnaryOperator, post:Bool, e:TExpr);
 
     TArrayDecl(values: Array<TExpr>);//TODO: allow array comprehensions of subqueries
     TObjectDecl(fields: Array<{key:String, value:TExpr}>);
+    TCase(type: CaseType);
+}
+
+enum CaseType {
+    Expr;
+    Standard(branches:Array<CaseBranchStd>, ?defaultExpr:TExpr);
+}
+
+class CaseBranchStd {
+    public final e: SelPredicate;
+    public final result: TExpr;
+
+    public function new(e, result) {
+        this.e = e;
+        this.result = result;
+    }
 }
 
 class TExprTypeTools {
-    public static function print(e: TExprType):String {
+    public static function clone(e: TExprType):TExprType {
+        return switch e {
+            case TConst(value): TConst(value);
+            case TReference(name): TReference(name);
+            case TParam(name): TParam(name);
+            case TTable(name): TTable(name);
+            case TColumn(name, table): TColumn(name, table);
+            case TField(o, field): TField(o.clone(), field);
+            case TArray(arr, index): TArray(arr.clone(), index.clone());
+            case TFunc(f): TFunc(f);
+            case TCall(f, params): TCall(f.clone(), [for (p in params) p.clone()]);
+            case TBinop(op, left, right): TBinop(op, left.clone(), right.clone());
+            case TUnop(op, post, e): TUnop(op, post, e.clone());
+            case TArrayDecl(values): TArrayDecl([for (v in values) v.clone()]);
+            case TObjectDecl(fields): TObjectDecl([for (f in fields) {key:f.key, value:f.value.clone()}]);
+            case TCase(type): TCase(switch type {
+                case Expr: Expr;
+                case Standard(branches, defaultExpr): Standard([for (b in branches) new CaseBranchStd(b.e.clone(), b.result.clone())], if (defaultExpr != null) defaultExpr.clone() else null);
+            });
+        }
+    }
+
+    public static function print(e:TExprType):String {
+		var b = new StringBuf();
+        printExpr(e, b);
+        return b.toString();
+    }
+
+    public static function printExpr(e:TExprType, out:StringBuf) {
+        inline function add(s:String) {
+            out.addSub(s, 0);
+        }
+
         switch e {
             case TConst(value): 
-                return tvprint(value);
+                add(tvprint(value));
             case TParam(name): 
-                return ':${name.label}';
+                var s = ':${name.label}';
+                add(s);
             case TTable(name), TReference(name):
-                return name.identifier;
-            case TColumn(name, table):
-                return table.identifier + '.' + name.identifier;
+                var s = name.identifier;
+                add(s);
+            case TColumn(name, _.label()=>table):
+                var s = table!=null?table + '.':'' + name.identifier;
+                add(s);
             case TField(o, field):
-                return print(o.expr) + '.$field';
+                printExpr(o.expr, out);
+                add('.$field');
+            case TArray(arr, idx):
+                printExpr(arr.expr, out);
+                add('[');
+                printExpr(idx.expr, out);
+                add(']');
             case TFunc(f):
-                return f.symbol.identifier;
+                var s = f.id;
+                add(s);
             case TCall(f, params):
-                return print(f.expr) + '('+params.map(e -> print(e.expr)).join(',')+')';
-			case TBinop(op, print(_.expr) => left, print(_.expr) =>right):
-                return left + printbinop(op) + right;
+                printExpr(f.expr, out);
+                add('(');
+                if (params.length > 1) {
+                    var last = params.pop();
+                    for (p in params) {
+                        printExpr(p.expr, out);
+                        add(',');
+                    }
+                    printExpr(last.expr, out);
+                    add(')');
+                }
+                else if (params.length == 1) {
+                    printExpr(params[0].expr, out);
+                }
+                add(')');
+			case TBinop(op, _.expr => left, _.expr =>right):
+                printExpr(left, out);
+                add(printbinop(op));
+                printExpr(right, out);
             case TUnop(op, post, e):
-                return post ? print(e.expr)+printunop(op) : printunop(op)+print(e.expr);
+                // post ? print(e.expr)+printunop(op) : printunop(op)+print(e.expr);
+                if (post) {
+                    add(printunop(op));
+                    printExpr(e.expr, out);
+                }
+                else {
+                    printExpr(e.expr, out);
+                    add(printunop(op));
+                }
             case TArrayDecl(values):
-                return '(${values.map(e -> print(e.expr)).join(',')})';
+                // '(${values.map(e -> print(e.expr)).join(',')})';
             case TObjectDecl(fields):
-                return "{" + fields.map(function(_) {
-                    return print(TConst(_.key)) + ': ' + print(_.value.expr);
-                }).join(',\n') + "}";
+                // "{" + fields.map(function(_) {
+                //     return print(TConst(_.key)) + ': ' + print(_.value.expr);
+                // }).join(',\n') + "}";
+
+            case TCase(type):
+                switch type {
+                    case Expr:
+                    case Standard(branches, elseExpr):
+                        add('CASE ');
+                        throw new pm.Error('CASE');
+                }
         }
+        return ;
 
         throw new pm.Error('Unhandled $e');
     }
@@ -503,30 +678,28 @@ class TExprTypeTools {
     }
 }
 
-typedef ATFunction = Function & {
-    var f: haxe.Constraints.Function;
-};
-class TFunction {
-    public var kind:FunctionKind;
-    public var symbol: Sym;
-    public var f: Null<Funct> = null;
-    // public var parameters:Array<Array<SType>>;
-    // public var returnType:Array<SType>;
+// class TFunction {
+//     public var kind:FunctionKind;
+//     public var symbol: Sym;
+//     public var f: Null<Funct> = null;
+    
+//     // public var parameters:Array<Array<SType>>;
+//     // public var returnType:Array<SType>;
 
-    public function new(id, kind, ?f) {
-        this.kind = kind;
-        this.symbol = id;
-        this.f = f;
+//     public function new(id, kind, ?f) {
+//         this.kind = kind;
+//         this.symbol = id;
+//         this.f = f;
 
-        // this.parameters = new Array();
-        // this.returnType = new Array();
-    }
-}
+//         // this.parameters = new Array();
+//         // this.returnType = new Array();
+//     }
+// }
 
 private typedef Sym = SqlSymbol;
 typedef JITFn<Out> = (g:{context:Context<Dynamic, Dynamic, Dynamic>}) -> Out;
 
-enum Funct {
-    FSimple(f: F);
-    FAggregate(agg: Dynamic);
-}
+// enum Funct {
+//     FSimple(f: F);
+//     FAggregate(agg: Dynamic);
+// }

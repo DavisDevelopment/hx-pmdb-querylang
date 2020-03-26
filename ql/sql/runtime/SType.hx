@@ -15,6 +15,7 @@ using haxe.macro.ComplexTypeTools;
 @:using(ql.sql.runtime.SType.STypes)
 enum SType {
 	TUnknown;
+
 	TBool;
 	TInt;
 	TFloat;
@@ -23,6 +24,12 @@ enum SType {
 	TArray(type:SType);
 	TMap(key:SType, value:SType);
 	TStruct(schema:SqlSchema<Dynamic>);
+
+	/*
+	TBytes;
+	TMono(t: Null<SType>);
+	TSet(t: SType);
+	*/
 }
 
 class STypes {
@@ -294,7 +301,7 @@ class STypes {
 			
 			case TStruct(schema):
 				function(value: Dynamic) {
-					Console.error('use optimized schema.induct function');
+					//Console.error('use optimized schema.induct function');
 					return schema.induct(value);
 				}
 		}

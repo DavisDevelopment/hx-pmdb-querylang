@@ -3,6 +3,8 @@ package ql.sql.runtime;
 // import ql.sql.runtime.Sel.Context;
 // import ql.sql.runtime.Sel.Scope;
 
+import ql.sql.grammar.CommonTypes.Contextual;
+import haxe.ds.ReadOnlyArray;
 import ql.sql.runtime.Stmt.SelectStmt;
 import ql.sql.runtime.Sel.TableStream;
 import pm.LinkedStack;
@@ -17,83 +19,34 @@ import ql.sql.grammar.CommonTypes.SqlSymbol;
 import ql.sql.runtime.TAst;
 import ql.sql.runtime.DType;
 import ql.sql.runtime.SType;
+import ql.sql.runtime.Callable;
+import ql.sql.runtime.Glue;
 import pmdb.core.ValType;
 import haxe.Constraints.Function;
 
 import pm.Helpers.nor;
+import pm.Helpers.nn;
+import pm.strings.HashCode;
+import pm.strings.HashCode.sdbm;
+using pm.strings.HashCodeTools;
 
 class VirtualMachine {
-    public var context: Ctx;
-    public var glue: Glue<Dynamic, Dynamic, Dynamic>;
+	public var context: Context<Dynamic, Dynamic, Dynamic>;
+	public var parser: VMParser;
+	public var compiler: Compiler;
+	public var optimizer: Optimizer;
+	public var interp: Interpreter;
 
-    public function new(?g) {
-        //TODO: context, glue, etc
-        this.context = new Ctx(g);
-        // this.glue = new Glue();
-        // this.glue = 
-    }
+	public function new(ctx) {
+		this.context = ctx;
+		this.parser = new VMParser();
+		this.compiler = new Compiler(this.context);
+		this.interp = new Interpreter(this.context);
+	}
 }
 
 class Environment {
 	//TODO
-}
-
-/**
-  method naming pattern:
-    <domain><method name, capitalized>(<subject>, ...<args>)
-  example:
-   - dbDoSomething(db:Db)
-   - tblGetSchema(table:Table)
-   - rowGetColumnByName(row:Row, name:String)
- **/
-class Glue<TDb, Table, Row> {
-    public var database:TDb;
-    var table:Null<Table> = null;
-
-    public function new() {
-        
-    }
-
-    public function dbListTables(db:TDb):Array<String> {
-        throw new pm.Error.ValueError(Glue.NotFound, 'error msg');
-	}
-	
-    public function dbLoadTable(db:TDb, table:String):Table {
-        throw new pm.Error.ValueError(Glue.NotFound, 'error msg');
-    }
-
-    public function tblGetAllRows(table:Table):Array<Row> {
-        throw new pm.Error.ValueError(Glue.NotFound, 'error msg');
-    }
-    public function tblGetWhere(table:Table, column:String, value:Dynamic):Array<Row> {
-        throw new pm.Error.ValueError(Glue.NotFound, 'error msg');
-    }
-
-    public function tblGetSchema(table:Table):SqlSchema<Row> {
-        throw new pm.Error.ValueError(Glue.NotFound, 'error msg');
-    }
-
-    public function rowGetColumnByName(row:Row, name:String):Dynamic {
-        throw new pm.Error.ValueError(Glue.NotFound, 'error msg');
-	}
-	
-	public function tblListColumns(table: Table):Array<SchemaField> {
-		return tblGetSchema(table).fields.fields.copy();
-	}
-
-	public function valIsTable(v: Dynamic):Bool {
-		throw new pm.Error.NotImplementedError();
-	}
-
-	public function valGetField(o:Dynamic, f:String):Dynamic return Reflect.field(o, f);
-	public function valSetField(o:Dynamic, f:String, v:Dynamic):Void return Reflect.setField(o, f, v);
-	public function valHasField(o:Dynamic, f:String):Bool return Reflect.hasField(o, f);
-	public function valRemoveField(o:Dynamic, f:String):Bool return Reflect.deleteField(o, f);
-	public function valFields(o:Dynamic):Array<String> return Reflect.fields(o);
-	public function valKeyValueIterator(o:Dynamic):KeyValueIterator<String, Dynamic> return Doc.unsafe(o).keyValueIterator();
-	public function valCopy(o: Dynamic):Dynamic return pmdb.core.Arch.clone(o);
-
-    private static inline final NotFound = -999;
 }
 
 private typedef Schema<Tbl> = Dynamic;
@@ -101,160 +54,10 @@ private typedef Schema<Tbl> = Dynamic;
 private typedef Db = pmdb.core.Database;
 private typedef Doc = pmdb.core.Object.Doc;
 private typedef Tbl = pmdb.core.Store<Doc>;
+
 #if !Console.hx
 private typedef Console = pm.utils.LazyConsole;
 #end
-
-class FOverload {
-	public final signature: haxe.ds.ReadOnlyArray<DType>;
-	public final returnType: DType;
-	public var f:Null<haxe.Constraints.Function> = null;
-
-	public function new(signature:Array<DType>, ret:DType, ?fn:haxe.Constraints.Function) {
-		this.signature = signature;
-		this.returnType = ret;
-		this.f = fn;
-	}
-
-	public function call(args:Array<Dynamic>):Dynamic {
-		if (f == null) {
-			throw new pm.Error('Cannot call function, no implementation defined');
-		}
-		else {
-			try {
-				var arity = pm.Functions.getNumberOfParameters(f);
-				// Console.examine(arity);
-				if (arity != args.length) {
-					// 
-					#if debug Console.warn('Invalid number of arguments. Accepts $arity positional arguments, but ${args.length} were given'); #end
-				}
-			}
-			catch (e: String) {}
-			
-			return Reflect.callMethod(null, f, args);
-		}
-	}
-
-	public function match(args: Array<Dynamic>):Bool {
-		if (args.length != signature.length) return false;
-		for (i in 0...args.length) {
-			if (!signature[i].validateValue(args[i]))
-				return false;
-		}
-		return true;
-	}
-}
-class F {
-	public final overloads: Array<FOverload>;
-	public var proxy: Null<haxe.Constraints.Function> = null;
-
-	public function new(?o:Array<FOverload>, ?f:Function) {
-		this.overloads = o.nor([]);
-		this.proxy = f;
-		// this.proxy = Reflect.makeVarArgs(this.call.bind(null, _));
-	}
-
-	public function add(ret:DType=DType.TUnknown, signature:Array<DType>, f:Function):F {
-		overloads.push(new FOverload(signature, ret, f));
-		return this;
-	}
-
-	public function match(args: Array<Dynamic>):Null<FOverload> {
-		for (o in overloads) {
-			if (o.match(args)) {
-				return o;
-			}
-		}
-		return null;
-
-		var candidates = overloads.copy();
-
-		for (argIdx in 0...args.length) {
-			var arg = args[argIdx];
-
-			var fnIdx = 0;
-			while (fnIdx < candidates.length) {
-				var i = fnIdx;
-				var f = candidates[fnIdx++];
-				var candidacy = true;
-				
-				if (argIdx >= f.signature.length) {
-					candidacy = false;
-				}
-				else if (f.signature[argIdx].validateValue(arg)) {
-					// Console.examine(f.signature[argIdx], arg, candidates);
-				} 
-				else {
-					candidacy = false;
-				}
-
-				if (!candidacy) {
-					candidates.remove(f);
-
-					if (candidates.length == 0)
-						break;
-					else
-						continue;
-				}
-			}
-
-			if (candidates.length == 0) return null;
-		}
-
-		for (c in candidates)
-			assert(c.match(args));
-
-		return candidates[0];
-	}
-
-	public function call(?overloadIdx:Int, args:Array<Dynamic>):Dynamic {
-		if (overloadIdx != null && overloadIdx >= 0 && overloadIdx < overloads.length)
-			return overloads[overloadIdx].call(args);
-
-		if (proxy != null) {
-			return Reflect.callMethod(null, proxy, args);
-		}
-
-		return switch match(args) {
-			case null:
-				throw new pm.Error('Invalid call, no overload matched (${args.join(',')})');
-
-			case f: f.call(args);
-		}
-	}
-
-	public static function declare(cfg: Doc):F {
-		var kvi = cfg.keyValueIterator();
-		var overloads = [];
-
-		for (signatureString=>method in kvi) {
-			if ((method is F)) {
-				method = Reflect.makeVarArgs(a -> (cast method : F).call(a));
-			}
-			else if (!Reflect.isFunction(method)) {
-				throw new pm.Error('Invalid overload function');
-			}
-			
-			var stringRet = signatureString.afterLast('->').trim();
-			var stringTypes = ~/\s*,\s*/g.split(signatureString.beforeLast('->'));
-			var types = [for (s in stringTypes) ValType.ofString(s.trim())];
-			var ret = ValType.ofString(stringRet);
-			// Console.examine(stringTypes, types);
-			var types = types.map(v -> DTypes.fromDataType(v));
-			// Console.examine(types);
-
-			overloads.push(new FOverload(types, DTypes.fromDataType(ret), method));
-		}
-
-		return new F(overloads);
-	}
-
-	public static function native<Fun:Function>(f: Fun):F {
-		var ret = new F([]);
-		ret.proxy = cast f;
-		return ret;
-	}
-}
 
 /**
  * ====================================================================
@@ -284,7 +87,7 @@ class Context<TDb, Table, Row> {
 	public var database:TDb;
 	public var tables:Map<String, Table>;
 	public var aliases:Scope<SqlSymbol>;
-	public var functions:Map<String, F>;
+	public var functions:Map<String, Callable>;
 
 	private var mSrcStack:LinkedStack<Array<TableSpec>>;
 	public var querySources(get, never):haxe.ds.ReadOnlyArray<TableSpec>;
@@ -334,13 +137,24 @@ class Context<TDb, Table, Row> {
 	// function set_currentRow(v: Row):Row {return this.scope.assign(':currentRow', currentRow);}
 
 	function _init() {
-		// this.scope.define(':currentRow', null);
+		// this.scope.define(':currentRow', null)
+		
+		inline function reg(name, callable) {
+			functions[name] = callable;
+			scope.define(name, callable);
+			return callable;
+		}
 
 		inline function f(name, o) {
-			scope.define(name, F.declare(o));
+			var f = F.declare(o);
+			functions[name] = f;
+			scope.define(name, f);
 		}
-		inline function nf(name, fn:Function) {
-			scope.define(name, F.native(fn));
+
+		inline function nf(name, signature:String, ?ret:String, fn:Function) {
+			var f = NF.declare(signature, ret, fn);
+			functions[name] = f;
+			scope.define(name, f);
 		}
 
 		f('int', {
@@ -353,16 +167,28 @@ class Context<TDb, Table, Row> {
 
 
 		f('str', {'Any -> String': Std.string});
-		nf('regexp', function(pattern:String, flags:String) {
+		nf('regexp', 'String,String->Any', function(pattern:String, flags:String) {
 			return new EReg(pattern, flags);
 		});
-		nf('strlower', (s:String)->s.toLowerCase());
-		nf('strupper', (s:String)->s.toUpperCase());
+		nf('strlower', 'String->String', (s:String) -> s.toLowerCase());
+		nf('strupper', 'String->String', (s:String) -> s.toUpperCase());
 
 		f('min', {
 			'int, int -> int': ((x:Int, y:Int) -> pm.Numbers.Ints.min(x, y) : Function),
 			'float, float -> float': (x:Float, y:Float) -> Math.min(x, y)
 		});
+
+		reg('hash', new NF(s -> sdbm.hash(s), [DType.TString], TInt));
+		reg('cat', new NF(
+			Reflect.makeVarArgs(function(args: Array<Dynamic>) {
+				var b:String = '';
+				for (v in args)
+					b += Std.string(v);
+				return b;
+			}),
+			[DType.TArray(TString)],
+			TString
+		));
 
 		scope.define('now', F.native(function():TypedValue return DateTime.now()));
 		scope.define('len', F.native(function(x: Dynamic):TypedValue {
@@ -414,6 +240,10 @@ class Context<TDb, Table, Row> {
 		return this;
 	}
 
+	public function removeQuerySource(src: TableSpec) {
+		return mSrcStack.top().remove(src);
+	}
+
 	function mergeSpecs(target:TableSpec, other:TableSpec) {
 		if (target.name != other.name) throw new pm.Error('Naming mismatch');
 		if (other.schema != target.schema) target.schema = other.schema;
@@ -430,21 +260,17 @@ class Context<TDb, Table, Row> {
 					r = true;
 					break;
 				}
-				
-				Console.debug(x);
 			}
 		return r;
 	}
 
-	@:noCompletion
+	#if !debug @:noCompletion #end
 	public var unaryCurrentRow:Bool = false;
 
 	public function use(src: TableSpec) {
 		final src = src.unwrap();
 		if (!has2d(mSrcStack, src, (x, y) -> (x.name == y.name)))
 			throw new pm.Error('${src.name} not found');
-		else
-			Console.debug(src);
 		currentDefaultTable = src.name;
 		
 		return this;
@@ -514,7 +340,7 @@ class Context<TDb, Table, Row> {
 			return scope.lookup(name);
 		}
 
-		throw new pm.Error.WTFError();
+		throw new pm.Error('NotFound("${name}")');
 	}
 
 	public function aliasTable(table:SqlSymbol, alias:SqlSymbol) {
@@ -675,7 +501,7 @@ class Context<TDb, Table, Row> {
 			return getSource(n);
 		}
 		catch (e: Dynamic) {
-			Console.error(e);
+			//Console.error(e);
 		}
 
 		throw new pm.Error(n, 'NotFound');
@@ -855,6 +681,7 @@ class Scope<T> {
 	class SelectSourceHandle {...}
 ```
  */
+@:yield
 class TableSpec {
 	public var name:String;
 	public var schema:SqlSchema<Dynamic>;
@@ -866,6 +693,8 @@ class TableSpec {
 
 	// public var
 	public function new(name, schema, data:{?stream:TableStream, ?stmt:SelectStmt, ?src:TableSpec, ?table:Dynamic}) {
+		assert(nn(name) && nn(schema));
+		
 		this.name = name;
 		this.schema = schema;
 		this.stream = data.stream;
@@ -882,6 +711,33 @@ class TableSpec {
 		// 	case {table:table}:
 		// 		this.table = table;
 		// }
+	}
+
+	/**
+	 * TODO write a pre-return test that verifies that the first and second values yielded by the returned iterator are not identical (the iterator actually iterates!)
+	 * @param g 
+	 * @return Iterator<Dynamic>
+	 */
+	public function open(g: Contextual):Iterator<Dynamic> {
+		var pre = openItr(g);
+		var a:Dynamic = pre.next(), b:Dynamic = pre.next();
+		assert(!pmdb.core.Arch.areThingsEqual(a, b), new pm.Error('$a == $b'));
+		return openItr(g);
+	}
+	 function openItr(g: Contextual):Iterator<Dynamic> {
+		var it = switch this {
+			case {src: null, table: null, stream: null}:
+				throw new pm.Error('Wtf');
+			case {src: _, table: null, stream: null}: src.open(g);
+			case {src: null, table: _, stream: null}: 
+				var all = g.context.glue.tblGetAllRows(table);
+				// Console.debug(all.slice(0, 3));
+				return all.iterator();
+			case {src: null, table: null, stream: _}: stream.open(g);
+			default:
+				throw new pm.Error('Unhandled, sha');
+		};
+		return it;
 	}
 
 	private function set_src(v: Null<TableSpec>) {
@@ -907,35 +763,7 @@ class TableSpec {
 
 private typedef Ctx = Context<Dynamic, Dynamic, Dynamic>;
 
-class PmdbGlue extends Glue<pmdb.core.Database, pmdb.core.Store<pmdb.core.Object.Doc>, pmdb.core.Object.Doc> {
-	public function new(db) {
-		super();
-		this.database = db;
-	}
-
-	@:extern
-	private inline function tfocus(t):Tbl {
-		return this.table = t;
-	}
-
-	override function dbListTables(db) {
-		return database.persistence.manifest.currentState.tables.map(t -> t.name);
-	}
-
-	override function dbLoadTable(db:pmdb.core.Database, table) {
-		return tfocus(db.table(table));
-	}
-
-	override function tblGetAllRows(table:Tbl):Array<Doc> {
-		return table.getAllData();
-	}
-
-	override function rowGetColumnByName(row:Doc, name:String) {
-		return row.get(name);
-	}
-}
-
-class PmdbContext extends Context<pmdb.core.Database, pmdb.core.Store<pmdb.core.Object.Doc>, pmdb.core.Object.Doc> {
+class PmdbContext extends Context<Dynamic, Dynamic, Dynamic> {
 	public function new(db) {
 		super(new PmdbGlue(db));
 		this.database = db;
@@ -976,6 +804,10 @@ class DummyGlue<Row> extends Glue<ql.sql.Dummy.AbstractDummyDatabase<ql.sql.Dumm
 
 	override function tblGetSchema(table: ql.sql.Dummy.DummyTable<Row>):SqlSchema<Row> {
 		return table.schema;
+	}
+
+	override function tblUpdate(tbl:DummyTable<Row>, oldRows:Array<Row>, newRows:Array<Row>) {
+		tbl.update(oldRows, newRows);
 	}
 
 	override function valIsTable(v:Dynamic):Bool {

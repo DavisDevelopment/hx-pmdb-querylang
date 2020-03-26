@@ -1,5 +1,9 @@
 package ql.sql.grammar.expression;
 
+#if !deprec
+class Expression {}
+#else
+
 import ql.sql.TsAst.SelectStatement;
 import ql.sql.TsAst.FunctionArgument;
 import ql.sql.TsAst.SqlAstNode;
@@ -54,9 +58,11 @@ class NullValue extends ConstantValue<Dynamic> {
 
 class ListExpression extends Expression implements FunctionArgument {
     public var values: Array<Expression>;
-    public function new(array: Array<Expression>) {
+    public var bracketed:Bool;
+    public function new(array:Array<Expression>, bracketed=false) {
         super();
         this.values = array.copy();
+        this.bracketed = bracketed;
     }
 
     public function isConstantList():Bool {
@@ -143,6 +149,16 @@ class InPredicate extends Predicate implements BinaryExpression<Expression, Pred
         this.right = r;
     }
 }
+class LikePredicate extends Predicate implements BinaryExpression<Expression, String> {
+    public var left: Expression;
+    public var right: String;
+
+    public function new(l, r) {
+        super();
+        this.left = l;
+        this.right = r;
+    }
+}
 
 enum ParamBinding {
     PIndex(i: Int);
@@ -193,6 +209,16 @@ class ColumnName extends Expression {
         super();
         this.name = name;
         this.table = table;
+    }
+}
+class FieldAccess extends Expression {
+    public var e: Expression;
+    public var field: String;
+
+    public function new(e, f) {
+        super();
+        this.e = e;
+        this.field = f;
     }
 }
 private class BinopExprBase<@:followWithAbstracts Op:EnumValue, Left, Right> extends Expression implements BinaryExpression<Left, Right> {
@@ -249,3 +275,57 @@ class SimpleFunctionCall extends FunctionCallBase<Expression> {
         super({symbol:f, kind:Simple}, args);
     }
 }
+
+class ArrayAccess extends Expression {
+    public var e: Expression;
+    public var index: Expression;
+
+    public function new(e, index) {
+        super();
+
+        this.e = e;
+        this.index = index;
+    }
+}
+
+// @SqlNodeMarker(SqlNodeType.CaseExpression)
+class CaseExpression extends Expression {
+	public var branches:Array<CaseBranchExpression>;
+	public var elseBranch:Null<Expression> = null;
+	public var expression:Expression;
+
+	public function new(?expression:Expression) {
+        super();
+		this.expression = expression;
+		this.branches = [];
+		this._init_();
+	}
+}
+
+// @SqlNodeMarker(SqlNodeType.CaseBranchExpression)
+class CaseBranchExpression extends Expression {
+	public var expression:Predicate;
+	public var result:Expression;
+
+	public function new(expression, result) {
+        super();
+		this.expression = expression;
+		this.result = result;
+		this._init_();
+	}
+}
+
+class TernaryExpression extends Expression {
+    public var condition: Predicate;
+    public var t: Expression;
+    public var f: Expression;
+
+    public function new(c, t, f) {
+        super();
+
+        this.condition = c;
+        this.t = t;
+        this.f = f;
+    }
+}
+#end

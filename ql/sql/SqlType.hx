@@ -1,5 +1,7 @@
 package ql.sql;
 
+import ql.sql.runtime.SType;
+
 @:using(ql.sql.SqlType.SqlTypes)
 enum SqlType {
     SAny;
@@ -10,11 +12,13 @@ enum SqlType {
 
 	SText;
 	SBlob;
-	// SDate;
+	SDate;
     SDateTime;
-    SList;
+    SList(size:Null<Int>, type:SqlType);
+
     SExt(type: SqlTypeExt);
 }
+
 enum SqlTypeExt {
 
 }
@@ -23,12 +27,12 @@ class SqlTypes {
     public static function isScalarType(t: SqlType):Bool {
         return switch t {
             case SAny: false;
-            case SList: false;
+            case SList(_, _): false;
             case SInt: true;
             case SFloat: true;
             case SText: true;
             case SBlob: true;
-            case SDateTime: true;
+            case SDateTime|SDate: true;
             case SExt(type): false;
         }
     }
@@ -41,10 +45,14 @@ class SqlTypes {
             case SFloat: (value is Float);
             case SText: (value is String);
             case SBlob: (value is String);//FIXME
-            case SDateTime: (value is Date);//TODO
-            case SList: (value is Array<Dynamic>);
+            case SDateTime|SDate: (value is Date);//TODO
+            case SList(_, _): (value is Array<Dynamic>);
             case SExt(type):
                 throw 'TODO';
         }
+    }
+
+    public static function toSType(t: SqlType):SType {
+        throw new pm.Error('Unhandled $t');
     }
 }

@@ -48,7 +48,11 @@ class CTypedValue {
 		boolValue = (value is Bool) ? cast(value, Bool) : null;
 		dateValue = try SType.TDate.importValue(value) catch (e: Dynamic) null;
         arrayAnyValue = ((value is Array<Dynamic>) ? cast(value, Array<Dynamic>) : null);
-        mapValue = ((value is haxe.IMap<Dynamic, Dynamic>) ? cast(value, haxe.Constraints.IMap<Dynamic, Dynamic>) : null);
+		mapValue = ((value is haxe.IMap<Dynamic, Dynamic>) ? cast(value, haxe.Constraints.IMap<Dynamic, Dynamic>) : null);
+		
+		#if pmdb.forbid_typedvalue
+		throw new pm.Error('TypedValue constructed with (${value}, ${type.print()})');
+		#end
     }
     
     // @:property((value == null)) 
@@ -323,6 +327,10 @@ abstract TypedValue(CTypedValue) from CTypedValue to CTypedValue {
 		return new TypedValue(value, type, Never);
 	}
 
+	public static function getUnderlyingValue(x: Dynamic):Dynamic {
+		return is(x) ? (x : CTypedValue).export() : x;
+	}
+
 	// }endregion
 	// {region cast_to
 
@@ -490,7 +498,7 @@ class Operators {
 
 @:access(ql.sql.common.TypedValue)
 class BinaryOperators {
-	public static function getMethodHandle(op:BinaryOperator):(l:TypedValue, r:TypedValue) -> TypedValue {
+	public static function getMethodHandle(op:BinaryOperator):(l:Dynamic, r:Dynamic) -> Dynamic {
 		return switch op {
 			case OpEq: op_eq;
 			case OpGt: op_gt;
@@ -509,20 +517,64 @@ class BinaryOperators {
 		}
 	}
 
+	public static function apply(op:BinaryOperator, l:Dynamic, r:Dynamic):Dynamic {
+		return switch op {
+			case OpEq: op_eq(l, r);
+			case OpGt: op_gt(l, r);
+			case OpGte: op_gte(l, r);
+			case OpLt: op_lt(l, r);
+			case OpLte: op_lte(l, r);
+			case OpNEq: op_neq(l, r);
+			case OpMult: op_mult(l, r);
+			case OpDiv: op_div(l, r);
+			case OpMod: op_mod(l, r);
+			case OpAdd: op_add(l, r);
+			case OpSubt: op_subt(l, r);
+			case OpBoolAnd: op_bool_and(l, r);
+			case OpBoolOr: op_bool_or(l, r);
+			case OpBoolXor: op_bool_xor(l, r);
+		}
+	}
+
 	public static function op_err(l:TypedValue, r:TypedValue):TypedValue {
 		throw new pm.Error();
 	}
 
-	public static function op_add(l:TypedValue, r:TypedValue):TypedValue {
+	//public static function op_x(l:Dynamic, r:Dynamic):Dynamic {return top_x(TypedValue.ofAny(l), TypedValue.ofAny(r)).export();}
+	public static function op_eq(l:Dynamic, r:Dynamic):Dynamic {return top_eq(TypedValue.ofAny(l), TypedValue.ofAny(r)).export();}
+	public static function op_gt(l:Dynamic, r:Dynamic):Dynamic {return top_gt(TypedValue.ofAny(l), TypedValue.ofAny(r)).export();}
+	public static function op_gte(l:Dynamic, r:Dynamic):Dynamic {return top_gte(TypedValue.ofAny(l), TypedValue.ofAny(r)).export();}
+	public static function op_lt(l:Dynamic, r:Dynamic):Dynamic {return top_lt(TypedValue.ofAny(l), TypedValue.ofAny(r)).export();}
+	public static function op_lte(l:Dynamic, r:Dynamic):Dynamic {return top_lte(TypedValue.ofAny(l), TypedValue.ofAny(r)).export();}
+	public static function op_neq(l:Dynamic, r:Dynamic):Dynamic {return top_neq(TypedValue.ofAny(l), TypedValue.ofAny(r)).export();}
+	public static function op_mult(l:Dynamic, r:Dynamic):Dynamic {return top_mult(TypedValue.ofAny(l), TypedValue.ofAny(r)).export();}
+	public static function op_div(l:Dynamic, r:Dynamic):Dynamic {return top_div(TypedValue.ofAny(l), TypedValue.ofAny(r)).export();}
+	public static function op_mod(l:Dynamic, r:Dynamic):Dynamic {return top_mod(TypedValue.ofAny(l), TypedValue.ofAny(r)).export();}
+	public static function op_add(l:Dynamic, r:Dynamic):Dynamic {
+		try {
+			return top_add(TypedValue.ofAny(l), TypedValue.ofAny(r)).export();
+		}
+		catch (e: Dynamic) {
+			throw new pm.Error('Invalid operation: $l + $r');
+		}
+	}
+	public static function op_subt(l:Dynamic, r:Dynamic):Dynamic {return top_subt(TypedValue.ofAny(l), TypedValue.ofAny(r)).export();}
+	public static function op_bool_and(l:Dynamic, r:Dynamic):Dynamic {return top_bool_and(TypedValue.ofAny(l), TypedValue.ofAny(r)).export();}
+	public static function op_bool_or(l:Dynamic, r:Dynamic):Dynamic {return top_bool_or(TypedValue.ofAny(l), TypedValue.ofAny(r)).export();}
+	public static function op_bool_xor(l:Dynamic, r:Dynamic):Dynamic {return top_bool_xor(TypedValue.ofAny(l), TypedValue.ofAny(r)).export();}
+
+	public static function top_add(l:TypedValue, r:TypedValue):TypedValue {
 		return switch [l, r] {
 			case [{type: TString}, _] | [_, {type: TString}]: TypedValue.ofString('${l.value}${r.value}'); // : TypedValue);
 			case [{type: TFloat | TInt}, {type: TFloat | TInt}]: TypedValue.ofAny(l.value + r.value);
+			case [{type:TUnknown, value:l}, {type:TUnknown, value:r}]:
+				try TypedValue.ofAny(l + r) catch (e: Dynamic) throw new pm.Error('Invalid operation: $l + $r');
 			case [_, _]:
 				throw new pm.Error('Invalid operation: $l + $r');
 		}
 	}
 
-	public static function op_mult(l:TypedValue, r:TypedValue):TypedValue {
+	public static function top_mult(l:TypedValue, r:TypedValue):TypedValue {
 		var n:Int = -1, v:TypedValue = r;
 		switch [l.type, r.type] {
 			case [TInt, _]:
@@ -547,7 +599,7 @@ class BinaryOperators {
 		}
 	}
 
-	public static function op_div(l:TypedValue, r:TypedValue):TypedValue {
+	public static function top_div(l:TypedValue, r:TypedValue):TypedValue {
 		switch [l, r] {
 			case [{type: TInt | TFloat}, {type: TInt | TFloat}]:
 				return (l.intValue != null ? 0.0 + l.intValue : l.floatValue) / (r.intValue != null ? 0.0 + r.intValue : r.floatValue);
@@ -556,11 +608,11 @@ class BinaryOperators {
 		}
 	}
 
-	public static function op_mod(l:TypedValue, r:TypedValue):TypedValue {
+	public static function top_mod(l:TypedValue, r:TypedValue):TypedValue {
 		throw new pm.Error.NotImplementedError();
 	}
 
-	public static function op_subt(l:TypedValue, r:TypedValue):TypedValue {
+	public static function top_subt(l:TypedValue, r:TypedValue):TypedValue {
 		switch [l, r] {
 			case [{type: TInt | TFloat}, {type: TInt | TFloat}]:
 				return l.numValue - r.numValue;
@@ -570,7 +622,7 @@ class BinaryOperators {
 		throw new pm.Error('Invalid operation: $l - $r');
 	}
 
-	public static function op_eq(l:TypedValue, r:TypedValue):TypedValue {
+	public static function top_eq(l:TypedValue, r:TypedValue):TypedValue {
 		if (l.value == r.value)
 			return true;
 		if (pmdb.core.Arch.areThingsEqual(l.value, r.value))
@@ -579,31 +631,31 @@ class BinaryOperators {
 		return false;
 	}
 
-	public static function op_neq(l:TypedValue, r:TypedValue):TypedValue {
-		return !op_eq(l, r).boolValue;
+	public static function top_neq(l:TypedValue, r:TypedValue):TypedValue {
+		return !top_eq(l, r).boolValue;
 	}
 
-	public static function op_cmp(l:TypedValue, r:TypedValue):Int {
+	public static function top_cmp(l:TypedValue, r:TypedValue):Int {
 		return pmdb.core.Arch.compareThings(l.value, r.value);
 	}
 
-	public static function op_gt(l:TypedValue, r:TypedValue):TypedValue {
-		return op_cmp(l, r) > 0;
+	public static function top_gt(l:TypedValue, r:TypedValue):TypedValue {
+		return top_cmp(l, r) > 0;
 	}
 
-	public static function op_gte(l:TypedValue, r:TypedValue):TypedValue {
-		return op_cmp(l, r) >= 0;
+	public static function top_gte(l:TypedValue, r:TypedValue):TypedValue {
+		return top_cmp(l, r) >= 0;
 	}
 
-	public static function op_lt(l:TypedValue, r:TypedValue):TypedValue {
-		return op_cmp(l, r) < 0;
+	public static function top_lt(l:TypedValue, r:TypedValue):TypedValue {
+		return top_cmp(l, r) < 0;
 	}
 
-	public static function op_lte(l:TypedValue, r:TypedValue):TypedValue {
-		return op_cmp(l, r) <= 0;
+	public static function top_lte(l:TypedValue, r:TypedValue):TypedValue {
+		return top_cmp(l, r) <= 0;
 	}
 
-	public static function op_bool_and(l:TypedValue, r:TypedValue):TypedValue {
+	public static function top_bool_and(l:TypedValue, r:TypedValue):TypedValue {
 		return switch [l.type, r.type] {
 			case [TBool, TBool]: l.boolValue && r.boolValue;
 			case [lt, rt]:
@@ -611,20 +663,20 @@ class BinaryOperators {
 		}
 	}
 
-	public static function op_bool_or(l:TypedValue, r:TypedValue):TypedValue {
+	public static function top_bool_or(l:TypedValue, r:TypedValue):TypedValue {
 		return switch [l.type, r.type] {
 			case [TBool, TBool]: l.boolValue || r.boolValue;
 			case [_, _]: pmdb.core.Arch.isTruthy(l.value) ? l : r;
 		}
 	}
 
-	public static function op_bool_xor(l:TypedValue, r:TypedValue):TypedValue {
+	public static function top_bool_xor(l:TypedValue, r:TypedValue):TypedValue {
 		throw new pm.Error.NotImplementedError();
 	}
 }
 
 class UnaryOperators {
-	public static function getMethodHandle(op:UnaryOperator):(value:TypedValue) -> TypedValue {
+	public static function getMethodHandle(op:UnaryOperator):(value:Dynamic) -> Dynamic {
 		return switch op {
 			case OpNot: op_not;
 			case OpNegBits: throw new pm.Error.NotImplementedError();
@@ -633,14 +685,35 @@ class UnaryOperators {
 		}
 	}
 
-	public static function op_not(value:TypedValue):TypedValue {
+	public static function apply(op:UnaryOperator, value:Dynamic):Dynamic {
+		return switch op {
+			case OpNot: op_not(value);
+			case OpNegBits: throw new pm.Error.NotImplementedError();
+			case OpPositive: op_positive(value);
+			case OpNegative: op_negative(value);
+		}
+	}
+
+	public static function op_not(value: Dynamic):Dynamic {
+		return top_not(TypedValue.ofAny(value)).export();
+	}
+
+	public static function op_negative(value: Dynamic):Dynamic {
+		return top_negative(TypedValue.ofAny(value)).export();
+	}
+
+	public static function op_positive(value: Dynamic):Dynamic {
+		return top_positive(TypedValue.ofAny(value)).export();
+	}
+
+	public static function top_not(value:TypedValue):TypedValue {
 		return switch value.boolValue {
 			case null: !pmdb.core.Arch.isTruthy(value.value);
 			case b: !b;
 		}
 	}
 
-	public static function op_negative(value:TypedValue):TypedValue {
+	public static function top_negative(value:TypedValue):TypedValue {
 		return switch value.type {
 			case TInt: -(value.intValue);
 			case TFloat: -(value.floatValue);
@@ -649,7 +722,7 @@ class UnaryOperators {
 		}
 	}
 
-	public static function op_positive(value:TypedValue):TypedValue {
+	public static function top_positive(value:TypedValue):TypedValue {
 		return switch value.type {
 			case TInt: pm.Numbers.Ints.abs(value.intValue);
 			case TFloat: Math.abs(value.floatValue);

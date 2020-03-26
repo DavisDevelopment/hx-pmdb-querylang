@@ -1,27 +1,33 @@
 package ql.sql.runtime;
 
-import ql.sql.runtime.Stmt.CSTNode;
-import ql.sql.runtime.Stmt.SelectStmt;
-import ql.sql.runtime.Sel.TableStream;
-import ql.sql.runtime.Sel.TableSource as TblSrc;
-import ql.sql.runtime.Sel.TableSourceItem as TblSrcItem;
-import ql.sql.runtime.Sel.TableRef;
-import ql.sql.runtime.Sel.TableJoin;
-import ql.sql.runtime.Sel.Aliased;
+import ql.sql.runtime.Sel.TableSourceItem;
 import haxe.ds.Either;
-import ql.sql.runtime.Sel.SelectImpl;
 import pmdb.core.Object;
 import pmdb.core.Arch;
 
 import ql.sql.TsAst;
 import ql.sql.grammar.CommonTypes;
 import ql.sql.grammar.expression.Expression;
+import ql.sql.ast.Query;
+import ql.sql.ast.Query.TableSpec as TableRef;
 
 import ql.sql.runtime.VirtualMachine;
 import ql.sql.runtime.TAst;
 import ql.sql.common.TypedValue;
 import ql.sql.common.SqlSchema;
-import ql.sql.common.internal.ObjectPure as ImmutableStruct;
+import ql.sql.common.internal.ImmutableStruct;
+
+import ql.sql.runtime.sel.SelectStmtContext;
+import ql.sql.runtime.Stmt;
+import ql.sql.runtime.Stmt.CSTNode;
+import ql.sql.runtime.Stmt.SelectStmt;
+import ql.sql.runtime.Sel.TableStream;
+import ql.sql.runtime.Sel.TableSource as TblSrc;
+import ql.sql.runtime.Sel.TableSourceItem as TblSrcItem;
+// import ql.sql.runtime.Sel.TableRef;
+import ql.sql.runtime.Sel.TableJoin;
+import ql.sql.runtime.Sel.Aliased;
+import ql.sql.runtime.Sel.SelectImpl;
 
 using Lambda;
 using pm.Arrays;
@@ -59,20 +65,6 @@ class Compiler extends SqlRuntime {
         return c;
     }
 
-    // public function loadTable(name: String):Null<Dynamic> {
-    //     Console.examine(name);
-    //     if (context.tables.exists(name))
-    //         return context.tables.get(name);
-    //     var res = context.tables[name] = glue.dbLoadTable(context.database, name);
-    //     if (res == null) {
-    //         res = context.tables[name] = context.scope.lookup(name);
-    //     }
-
-    //     var schema = glue.tblGetSchema(res);
-    //     visitSqlSchema(schema);
-    //     trace('LOADED "$name"');
-    //     return res;
-    // }
     override function loadTable(name:String):Null<Dynamic> {
         var table = super.loadTable(name);
         if (table != null) {
@@ -82,32 +74,54 @@ class Compiler extends SqlRuntime {
         return table;
     }
 
-    public function compile(stmt: SqlStatement):Stmt {
-        // var selectStmt = stmt.toSelect();
-        // return compileSelectStmt(selectStmt);
-        switch stmt.data {
-            case DmlStatement(dml): 
-                switch dml {
-                    case SelectStatement(select):
-                        // var node:CSTNode = new SelectStmt(compileSelectStmt(select));
-						var node = compileSelectStmt(select);
-                        return new Stmt(node, SelectStatement(cast node));
-                }
+    public function compile(stmt: Query):Stmt<Dynamic> {
+        switch stmt {
+            case Select(select):
+                var sel = compileSelectStmt(select);
+                return new Stmt(sel, SelectStatement(sel));
+            case Insert(insert):
+                throw new pm.Error('TODO');
+            case CreateTable(createTable):
+                throw new pm.Error('TODO');
         }
     }
 
     function visitSqlSchema(schema: SqlSchema<Dynamic>) {
-		schema.context = this.context;
-		for (field in schema.fields) {
+        schema.context = this.context;
+        final processSchema = schema.mode.match(RowMode);
+
+		if (processSchema) for (field in schema.fields) {
 			if (field.defaultValueString != null && field.defaultValueExpr == null) {
-				var e = NewSqlParser.readExpression(field.defaultValueString);
+				var e = VMParser.readExpression(field.defaultValueString);
 				var e = this.compileExpression(e);
 				field.defaultValueExpr = e;
 			}
-		}
+        }
+
+        if (processSchema && schema.indexing != null) for (idx in schema.indexing.indexes) {
+            if (idx.extractor == null && idx.extractorSql != null) {
+                if (idx.extractorExpr == null) {
+					var e = VMParser.readExpression(idx.extractorSql);
+                    var e = this.compileExpression(e);
+                    idx.extractorExpr = e;
+                    var c = new Context(context.glue);
+                    c.unaryCurrentRow = true;
+                    var self = {context:c};
+                    idx.extractor = function(row: Doc):Dynamic {
+                        c.focus(row);
+                        return e.eval(self);
+                    };
+                }
+            }
+        }
     }
 
-    function compileSelectStmt(select : SelectStatement):Sel<Dynamic, Dynamic, Dynamic> {
+    /**
+     * compiles/preprocesses SelectStmt instances
+     * @param select 
+     * @return SelectStmt
+     */
+    function compileSelectStmt(select : SelectStatement):SelectStmt {
         var query = select.query.query;
         if (query.from == null)
             throw new pm.Error.WTFError();
@@ -124,100 +138,85 @@ class Compiler extends SqlRuntime {
         
         var querySource = [];
         var thisSource = csrc.getSpec(context);
-        trace(thisSource);
+        // trace(thisSource);
         querySource.push(thisSource);
-        /*
-            thisSource = new ql.sql.runtime.VirtualMachine.TableSpec(
-                csrc.getName(context), 
-                csrc.getSchema(context),
-                switch csrc.item {
-                    case Table({alias:null, term:r}): {table:r.table};
-                    case Table({alias:alias, term:r}):
-                        querySource.push(new TableSpec(alias, glue.tblGetSchema(r.table), {table:r.table}));
-                        {src: querySource[0]};
-                    case Stream({alias:name, term:stream}):
-                        {
-                            stream: stream,
-                            stmt: stream.select
-                        };
-                }
-            )
-        */
-
-        // if (context.querySources.length == 0)
-            // context.querySources = querySource;
-        // else {
-            for (x in querySource)
-                context.addQuerySource(x);
-            // querySource = context.querySources;
-        // }
 
         if (csrc.joins != null) {
             for (j in csrc.joins) {
-                context.addQuerySource(j.mJoinWith.unwrap().src.unwrap());
+                var qs = j.mJoinWith.unwrap().src.unwrap();
+                if (qs.src != null)
+                    querySource.push(qs.src);
+                querySource.push(qs);
             }
         }
+
+		// for (x in querySource)
+            // context.addQuerySource(x);
+        context.pushSourceScope(querySource);
         
-        var predicate = query.from.where != null ? compileSelectPredicate(query.from.where.predicate) : null;
+        var predicate = query.from.where != null ? compileSelectPredicate(query.from.where.term) : null;
         
         var items:Array<SelItem> = [for (el in query.elements) compileSelectElement(el)];
         var out:SelOutput = items;
-        compileSelOutput(out, thisSource);
+        // var sourceList:Array<TableSpec> = computeReferencedSources()
+        compileSelOutput(out, querySource);
         
-        var result = new Sel(
-            this.context,
+        var selectCtx = new SelectStmtContext(this.context, querySource);
+        // selectCtx.sources = querySource.copy();
+
+        var result = new SelectStmt(
+            selectCtx,
             csrc,
             new SelectImpl(select, predicate, out)
         );
         var pre = result.evalHead;
-		// switch csrc.item {
-		// 	case Table({alias: alias, term: {table: table, name: name}}):
-        //         pre.push(function(g) {
-        //             g.context.currentDefaultTable = alias.nor(name);
-        //             return null;
-        //         });
-
-		// 	case Stream({alias:name}):
-        //         pre.push(function(g) {
-        //             g.context.currentDefaultTable = name;
-        //             return null;
-        //         });
-        // }
-        var tmp = @:privateAccess context.mSrcStack.top().copy();
+		
         pre.push(g -> {
-            g.context.pushSourceScope(tmp);
+            g.context.pushSourceScope(cast result.context.sources.sources);
             g.context.beginScope();
             g.context.use(thisSource);
-        });
+        }); 
         result.evalTail.push(g -> {
             g.context.popSourceScope();
             g.context.endScope();
         });
 
         if (query.orderBy != null) {
+            context.pushSourceScope([new TableSpec('_', result.resultSchema, {stmt:result})]);
             result.i.order = query.orderBy.expressions.map(function(o) {
                 return {
-                    accessor: compileExpression(o.expression),
+                    accessor: {
+                        // var tmp = context.unaryCurrentRow;
+                        // context.unaryCurrentRow = true;
+                        context.use(context.querySources[0]);
+                        final e = compileExpression(o.expression);
+                        // context.unaryCurrentRow = tmp;
+                        e;
+                    },
                     direction: switch o.sortType {
                         case Asc: 1;
                         case Desc: -1;
                     }
                 };
             });
+            context.popSourceScope();
         }
+
+        context.popSourceScope();
 
         return result;
     }
 
-	inline function toTblSrcItem(i:TableSourceItem):TblSrcItem {
-		var res = tableSourceItemConvert(i);
+//{region tablesourceitem
+
+	inline function toTblSrcItem(i:SelectSourceItem):TblSrcItem {
+		var res = sourceItemConvert(i);
 		compileTblSrcItem(res);
 		return res;
 	}
 
-    function tableSourceConvert(src: TableSource):TblSrc {
-        // Console.examine(src);
-        var item = toTblSrcItem(src.tableSourceItem);
+    function tableSourceConvert(src: SelectSource):TblSrc {
+        var item = toTblSrcItem(src.sourceItem);
 
         // var csrc:TblSrc = new TblSrc(Table(new Aliased(alias, new TableRef(tableSpec.tableName.identifier, table))));
         var csrc = new TblSrc(item);
@@ -225,7 +224,6 @@ class Compiler extends SqlRuntime {
 		if (joins != null) {
 			var cjoins:Array<TableJoin> = new Array();
 			for (join in joins) {
-				// var tbl = tableSourceItemConvert(join.joinWith).
                 var cjoin = new TableJoin(join.joinType, toTblSrcItem(join.joinWith));
                 var tmp = new TblSrc(cjoin.joinWith);
                 var joinSrc = tmp.getSpec(context);
@@ -233,30 +231,62 @@ class Compiler extends SqlRuntime {
                 cjoin.mJoinWith = {src:joinSrc};
                 
                 if (join.on != null) {
-                    context.pushSourceScope([joinSrc]);
-                    // context.querySources.push(joinSrc);
+                    context.pushSourceScope([csrc.getSpec(context), joinSrc]);
                     cjoin.on = compileSelectPredicate(cast join.on);
-                    // context.querySources = tmp;
                     context.popSourceScope();
                 }
                 
-				if (join.used != null) {
+				if (join.usingColumns != null) {
 					throw new pm.Error('TODO');
 				}
 				cjoins.push(cjoin);
 			}
-			// (csrc.joins != null ? csrc.joins : (csrc.joins = [])).push()
 			csrc.joins = cjoins;
         }
         
         return csrc;
     }
 
+    function sourceConvert(src: SelectSource) {
+        throw src;
+    }
+
+    function sourceItemConvert(item:SelectSourceItem):TblSrcItem {
+        var ssi = TblSrcItem;
+        switch item {
+            case Aliased(src, alias):
+                var inner = sourceItemConvert(src);
+                switch inner {
+                    case Table({term:v}):
+                        return ssi.Table(new Aliased(alias, v));
+                    case Stream({term:v}):
+                        return ssi.Stream(new Aliased(alias, v));
+                }
+
+            case Table(table): 
+                return ssi.Table(new Aliased(null, context.getSource(table.tableName)));
+
+            case Subquery(query):
+                var stream = new TableStream(compileSelectStmt(query));
+                stream.schema = stream.select.resultSchema;
+                stream.open = function(g: Contextual):Iterator<Dynamic> {
+                    return stream.select.eval().iterator();
+                };
+                return ssi.Stream(new Aliased(null, stream));
+            
+            case Expr(e):
+                throw new pm.Error('TODO: Expr as select source');
+        }
+
+        throw new pm.Error('Conversion failed: $item');
+    }
+
     private var targetQuerySource:Null<TableSpec> = null;
-    function tableSourceItemConvert(item: TableSourceItem):TblSrcItem {
+    
+#if brozen
+    function tableSourceItemConvert(item: SelectSourceItem):TblSrcItem {
         var alias:Null<String> = null;
-        var tableSpec:Null<ql.sql.TsAst.TableSpec> = null;
-        // var cjoins = null;
+        var tableSpec:Null<TableSpec> = null;
         final node:SqlAstNode = item;
         var tableStream:Null<TableStream> = null;
         
@@ -270,27 +300,19 @@ class Compiler extends SqlRuntime {
             alias = aliased.alias.identifier;
 
             if ((term is ql.sql.TableSpec)) {
-                tableSpec = (term : TableSourceItem).toTableSpec();
+                tableSpec = (term : SelectSourceItem).toTableSpec();
             }
 
             if ((term is ql.sql.NestedSelectStatement)) {
                 var subStmt:NestedSelectStatement = cast term;
-
-                // context.pushSourceScope([
-                    // new TableSpec('$alias:${}')
-                // ])
                 var stmt = compileSelectStmt(subStmt.statement);
-                //Console.examine(stmt.i._exporter);
 
                 tableStream = new TableStream();
                 tableStream.astNode = term;
                 tableStream.schema = stmt.resultSchema;
                 tableStream.open = function(g) {
-                    stmt.context = g.context;
                     return stmt.eval().iterator().map(function(row: Dynamic) {
-                        // g.context.currentRows[alias] = row;
                         g.context.focus(row, alias);
-                        // //Console.examine(g.context.currentRows);
                         return row;
                     });
                 };
@@ -304,11 +326,8 @@ class Compiler extends SqlRuntime {
 			tableStream.astNode = subStmt;
 			tableStream.schema = stmt.resultSchema;
 			tableStream.open = function(g) {
-				stmt.context = g.context;
 				return stmt.eval().iterator().map(function(row:Dynamic) {
-                    // g.context.currentRow = row;
                     g.context.focus(row, '_');
-					// //Console.examine(g.context.currentRows);
 					return row;
 				});
 			};
@@ -318,9 +337,6 @@ class Compiler extends SqlRuntime {
             var table = context.resolveTableFrom(context.getSource(tableSpec.tableName.identifier));
 
             if (table == null) throw new pm.Error();
-            if (alias != null) {
-                context.scope.define(alias, table);
-            }
 
             return TblSrcItem.Table(new Aliased(alias, new TableRef(tableSpec.tableName.identifier, table)));
         }
@@ -331,27 +347,38 @@ class Compiler extends SqlRuntime {
 
         throw new pm.Error.ValueError(item);
     }
+#end
 
     function compileTblSrcItem(item: TblSrcItem) {
+        // Console.log(item);
         switch item {
             case Table({term:{table:table}}):
                 var schema = glue.tblGetSchema(table);
                 visitSqlSchema(schema);
 
             case Stream(a={term:{schema:schema}}):
-                //Console.examine(a);
                 visitSqlSchema(schema);
         }
     }
+//}endregion
 
-    function compileSelectElement(element: ESelectElement) {
+//{region select_element
+    function compileSelectElement(element: SelectElement):SelItem {
+        return switch element {
+            case AllColumns(table): SelItem.All(symbol(table));
+            case Column(table, column, alias): 
+                SelItem.Column(symbol(table), symbol(column), if (alias == null) null else symbol(alias));
+            case Expr(e, null): SelItem.Expression(null, compileExpression(e));
+            case Expr(e, alias): SelItem.Expression(symbol(alias), compileExpression(e));
+        }
+        /*
         switch element {
             case AllColumns(el):
-                resolveTableSymbol(el);
+                // resolveTableSymbol(el);
                 return SelItem.All(el.table);
             
-            case ColumnName(el):
-                resolveTableSymbol(el);
+            case Column(table, el, null):
+                // resolveTableSymbol(el);
                 return SelItem.Column(el.table, el.name);
 
             case FunctionCall(el):
@@ -392,6 +419,7 @@ class Compiler extends SqlRuntime {
             default:
                 throw new pm.Error('Unhandled $element');
         }
+        */
     }
 
     /**
@@ -418,8 +446,6 @@ class Compiler extends SqlRuntime {
             
             case Column(table, column, alias):
                 var outKey = alias.nor(column);
-                Console.debug({table:s(table), column:s(column), alias:s(alias)});
-                
                 function(g, out:Doc):Doc {
                     var row:Null<Doc> = g.context.getCurrentRow(s(table));
                     final row:Doc = row.unwrap();
@@ -432,8 +458,7 @@ class Compiler extends SqlRuntime {
             case Expression(alias, expr):
                 var key:String;
                 if (alias == null) {
-                    key = 'ass';
-                    throw new pm.Error('AST-printing not implemented yet');
+                    key = expr.print();
                 }
                 else {
                     key = alias.identifier;
@@ -446,6 +471,7 @@ class Compiler extends SqlRuntime {
                 }
         }
     }
+//}endregion
 
     inline function exportValue(value: Dynamic):Dynamic {
         if (TypedValue.is(value)) {
@@ -456,32 +482,64 @@ class Compiler extends SqlRuntime {
         }
     }
 
-	function compileSelOutSchema(out:SelOutput, src:TableSpec) {
+	function compileSelOutSchema(out:SelOutput, sourcesList:Array<TableSpec>) {
+        var sourceList = [for (x in out.items) switch x {
+            case All(_.label()=>table) if (table != null): context.getSource(table);
+            case Column(_.label() => table, _, _) if (table != null): context.getSource(table);
+            case Expression(_, _), All(_), Column(_): null;
+        }].filter(x -> x != null);
+        var sources = [for (src in sourcesList) src.name => src];
         var columns = new Array();
+
         for (item in out.items) {
             switch item {
                 case All(null):
-                    for (c in src.schema.fields)
-                        columns.push(c.getInit());
+                    for (src in sources) {
+                        for (c in src.schema.fields) {
+                            columns.push(c.getInit());
+                        }
+                    }
                 
                 case All(table):
-                    var schema = getTableSchema(table.identifier);
+					var source = sources[table.label().unwrap()].unwrap(new pm.Error('`${table.label()}` not found'));
+                    var schema = source.schema;
                     for (c in schema.fields) {
                         columns.push(c.getInit());
                     }
 
                 case Column(table, column, alias):
                     // final col = context.glue.tblGetSchema(table.table).column(column.identifier).getInit();
-                    final col = getColumnField(column.identifier, if (table != null) table.identifier else null).getInit();
-                    if (alias != null)
-                        col.name = alias.identifier;
-                    columns.push(col);
+                    var ckey = column.identifier;
+                    inline function cinit(c: SchemaField) {
+                        var r = c.getInit();
+                        if (alias.label() != null)
+                            r.name = alias.identifier;
+                        return r;
+                    }
+
+                    if (table.label() == null) {
+                        for (src in sources) {
+                            var c = src.schema.column(ckey);
+                            if (c == null) continue;
+
+                            columns.push(cinit(c));
+                        }
+                    }
+                    else {
+                        var src = sources[table.label()].unwrap(new pm.Error('`${table.label()}` not found'));
+                        var c = src.schema.column(column.identifier).unwrap(new pm.Error('`${table.label()}`.`${column.identifier}` not found'));
+                        columns.push(cinit(c));                        
+                    }
 
                 case Expression(alias, expr):
-                    if (alias == null)
-                        throw new pm.Error('Alias must be defined');
+                    var name:String = alias.label();
+                    if (alias == null) {
+                        // throw new pm.Error('Alias must be defined');
+                        name = expr.print();
+                    }
+
                     columns.push({
-                        name: alias.identifier,
+                        name: name,
                         type: expr.type,
                         notNull: false,
                         unique: false,
@@ -502,18 +560,8 @@ class Compiler extends SqlRuntime {
         return schema;
     }
 
-    static function toMutableStruct(o: ImmutableStruct<TypedValue>):Doc {
-		return o.map(function(key, value:TypedValue) {
-			var v = value.export();
-			return {
-				key: key,
-				value: v
-			};
-		}).toMutable();
-    }
-
-    function compileSelOutput(exporter:SelOutput, src:TableSpec) {
-        var schema = compileSelOutSchema(exporter, src);
+    function compileSelOutput(exporter:SelOutput, sources:Array<TableSpec>) {
+        var schema = compileSelOutSchema(exporter, sources);
         switch exporter.items.toArray() {
             case [All(table)]:
                 exporter.mCompiled = function(g) {
@@ -527,15 +575,11 @@ class Compiler extends SqlRuntime {
         
         var items = exporter.items.map(item -> compileSelItem(item)).toArray();
         items.reverse();
-        // var schema = compileSelOutSchema(exporter);
 
         var f = function(g) {
             var out:Doc = new Doc();
             for (mut in items)
                 out = mut(g, out);
-            // var obj:Doc = toMutableStruct(out);
-            // obj = Doc.unsafe(schema.induct(obj));
-            // return obj;
             out = schema.induct(out);
             return out;
         };
@@ -602,7 +646,7 @@ class Compiler extends SqlRuntime {
     /**
       compiles the given expression into some shit
      **/
-    extern inline private function compileExpression(e: Expression) {
+    extern inline private function compileExpression(e: Expr) {
         var expr = expressionNodeConvert(e);
         compileTExpr(expr);
         return expr;
@@ -631,11 +675,11 @@ class Compiler extends SqlRuntime {
                 compileTExpr(o);
                 e.mCompiled = exprc(e);
 
-            // case TParam({label:label}):
-            //     e.mCompiled = exprc(e);
-
-            // case TFunc(f):
-            //     e.mCompiled = exprc(e);
+            case TArray(array, index):
+                //Console.examine(array, index);
+                compileTExpr(array);
+                compileTExpr(index);
+                e.mCompiled = exprc(e);
 
             case TCall(f, args):
                 compileTExpr(f);
@@ -657,6 +701,21 @@ class Compiler extends SqlRuntime {
                     compileTExpr(valueExpr);
                 e.mCompiled = exprc(e);
 
+            case TCase(caseType):
+                switch caseType {
+                    case Expr:
+                        //TODO
+
+                    case Standard(branches, defaultExpr):
+                        for (b in branches) {
+                            compileTPred(b.e);
+                            compileTExpr(b.result);
+                        }
+                        if (defaultExpr != null)
+                            compileTExpr(defaultExpr);
+                        e.mCompiled = exprc(e);
+                }
+
             case most:
                 e.mCompiled = exprc(e);
         }
@@ -674,8 +733,18 @@ class Compiler extends SqlRuntime {
      */
     private function exprc(expr: TExpr):JITFn<Dynamic> {
         if (expr.extra.exists('compilationLevel')) {
-            Console.error('Expression already compiled');
             return expr.mCompiled;
+        }
+
+        var unary:Bool = context.unaryCurrentRow;
+        inline function wrap(f:JITFn<Dynamic>) {
+            return f.wrap(function(_, g:Contextual) {
+                final tmp = g.context.unaryCurrentRow;
+                g.context.unaryCurrentRow = unary;
+                var ret = _(g);
+                g.context.unaryCurrentRow = tmp;
+                return ret;
+            });
         }
 
         return switch expr.expr {
@@ -685,6 +754,21 @@ class Compiler extends SqlRuntime {
 
             case TReference(name):
                 g -> g.context.get(name);
+                // function(g: Contextual) {
+                //     try {
+                //         return g.context.get(name);
+                //     }
+                //     catch (error: Dynamic) {
+                //         final c = g.context;
+                //         var i = c.querySources.length;
+                //         while (i-- > 0) {
+                //             var src = c.querySources[i];
+                //             if (src.name == name.label()) {
+
+                //             }
+                //         }
+                //     }
+                // }
 
 			case TParam({label: label, offset: offset}):
 				if (!parameters.exists(label.identifier)) {
@@ -694,8 +778,9 @@ class Compiler extends SqlRuntime {
 					parameters[label.identifier].push(expr);
                 }
 
-                function(g:{context:Context<Dynamic, Dynamic, Dynamic>}):Dynamic {
-                    return new pm.Error('No value bound to ${label.identifier}');
+                function(g: {context:Context<Dynamic, Dynamic, Dynamic>}):Dynamic {
+                    // return expr.mConstant;
+                    throw new pm.Error('No value bound to ${label.identifier}');
                 }
                 
             case TTable(name):
@@ -705,15 +790,22 @@ class Compiler extends SqlRuntime {
 
             case TColumn(name, table):
                 final name = name.identifier;
-                final tableName = table.label();
+                final tableName = table.label().unwrap(new pm.Error('table-name undefined'));
 
 
+                // assert(true, 'bitch');
                 function(g: Contextual) {
                     final c = g.context;
+                    if (c.unaryCurrentRow)
+                        throw new pm.Error('unary row');
                     final row:Doc = Doc.unsafe(c.getCurrentRow(tableName));
+                    if (row == null) {
+                        // Console.error(c.currentRows, '$tableName.$name');
+                    }
 
-                    if (!row.exists(name))
+                    if (!row.exists(name)) {
                         throw new pm.Error('$row has no property named "$name"');
+                    }
 
                     return row.get(name);
                 }
@@ -721,15 +813,24 @@ class Compiler extends SqlRuntime {
                 
             case TField(o, field):
                 function(g) {
-                    var res:Dynamic = g.context.glue.valGetField(o.eval(g), field.identifier);
+                    final obj = o.eval(g);
+                    
+                    var res:Dynamic = g.context.glue.valGetField(obj, field.identifier);
                     return res;
                 };
+
+            case TArray(array, index):
+                function(g: Contextual) {
+                    var a:Dynamic = array.eval(g);
+                    var i:Dynamic = index.eval(g);
+                    return a[i];
+                }
                     
             case TFunc(f):
-                var fname = f.symbol;
-                function(g) {
-                    Console.error('TFunc expression construct is deprecated');
-                    return g.context.get(fname);
+                var fname = f.id;
+                function(g: Contextual):Dynamic {
+                    // return g.context.get(fname);
+                    return g.context.functions[fname];
                 };
             
             //* Method calls
@@ -742,9 +843,9 @@ class Compiler extends SqlRuntime {
 
                 if (allConst) {
                     switch f.expr {
-                        case TReference(_.identifier=>fname), TFunc(_.symbol.identifier=>fname):
+                        case TReference(_.identifier=>fname), TFunc(_.id=>fname):
                             if (context.scope.isDeclared(fname)) {
-                                var fptr = cast(context.scope.lookup(fname), F);
+                                var fptr = cast(context.scope.lookup(fname), Callable);
                                 return function(g) {
                                     return fptr.call(constantParameters);
                                 };
@@ -758,8 +859,8 @@ class Compiler extends SqlRuntime {
                     var fn:Dynamic = f.eval( g );
                     var args = allConst ? constantParameters : [for (p in params) p.eval(g)];
 
-                    if ((fn is F)) {
-                        var ret = cast(fn, F).call(args);
+                    if ((fn is Callable)) {
+                        var ret = cast(fn, Callable).call(args);
                         return ret;
                     }
                     else {
@@ -769,8 +870,10 @@ class Compiler extends SqlRuntime {
             
             case TBinop(op, left, right):
                 var opf = BinaryOperators.getMethodHandle(op);
+                
+                //TODO optimize
                 function(g) {
-                    return opf(left.eval(g), right.eval(g)).value;
+                    return opf(left.eval(g), right.eval(g));
                 };
 
             case TUnop(op, _, e):
@@ -799,7 +902,74 @@ class Compiler extends SqlRuntime {
                 function(g):Dynamic {
                     throw new pm.Error.NotImplementedError();
                 }
+
+            case TCase(caseType):
+                switch caseType {
+                    case Expr:
+                        function(g: Contextual):Dynamic {
+							throw new pm.Error.NotImplementedError();
+                        }
+
+                    case Standard(branches, defaultExpr):
+                        function(g: Contextual):Dynamic {
+                            for (branch in branches) {
+                                if (branch.e.eval(g)) {
+                                    return branch.result.eval(g);
+                                }
+                            }
+                            return defaultExpr.eval(g);
+                        }
+                }
         }
+    }
+
+    /** 
+     * @inheritDoc 
+     */
+    override function expressionNodeConvert(e:Expr):TExpr {
+        var tblNames = context.glue.dbListTables(context.database);
+        switch e {
+            case EField(EId(tableName), Name(columnName)):
+                if (tblNames.has(tableName)) {
+                    return new TExpr(TColumn(symbol(columnName), symbol(tableName)));
+                }
+                else {
+                    var tbl = context.getSource(tableName);
+                    if (tbl != null) {
+                        return new TExpr(TColumn(symbol(columnName), symbol(tbl.name)));
+                    }
+                }
+
+            case EId(ident):
+                var i = context.querySources.length;
+                while (i-- > 0) {
+                    var src = context.querySources[i];
+                    var c = src.schema.column(ident);
+                    if (c != null)
+                        return new TExpr(TColumn(symbol(ident), symbol(src.name)));
+                }
+            
+            default:
+                
+        }
+        return super.expressionNodeConvert(e);
+
+        // var ret:TExpr = super.expressionNodeConvert(e);
+        // switch ret.expr {
+        //     case TField({expr:TReference(tbl=_.label()=>tableName)}, column) if (tblNames.has(tableName)):
+        //         return new TExpr(TColumn(column, tbl));
+            
+        //     case TReference(idSym=_.label()=>ident):
+        //         for (i in 0...context.querySources.length) {
+        //             var src = context.querySources[i];
+        //             if (src.schema.column(ident) != null) {
+        //                 return new TExpr(TColumn(idSym, symbol(src.name)));
+        //             }
+        //         }
+                
+        //     default:
+        // }
+        // return ret;
     }
 
     function typeBinopExpr(op:BinaryOperator, left:TExpr, right:TExpr):SType {
@@ -833,9 +1003,13 @@ class Compiler extends SqlRuntime {
                 }
             case OpDiv:
                 return switch types {
+                    case [TInt|TFloat, TUnknown]: right.type = TFloat;
+                    case [TUnknown, TInt|TFloat]: left.type = TFloat;
                     case [TInt|TFloat, TInt|TFloat]: TFloat;
-                    default:
-                        throw new pm.Error();
+                    case [_.print()=>lt, _.print()=>rt]:
+                        throw new pm.Error('InvalidOp: $lt / $rt');
+                    case _:
+                        throw new pm.Error('$types');
                 }
             case OpMod:
                 throw new pm.Error();
@@ -867,12 +1041,13 @@ class Compiler extends SqlRuntime {
         switch compLvl {
             case 1://* Expected value
             default:
-                Console.error('Unhandled: Expr.compilationLevel = $compLvl');
+                //Console.error('Unhandled: Expr.compilationLevel = $compLvl');
         }
 
         switch e.expr {
             case TReference({identifier:id}):
-                throw new pm.Error('TODO');
+                // throw new pm.Error('TODO: TReference($id)');
+                e.type = TUnknown;
             
             case TBinop(op, left, right):
                 typeExpr(left);
@@ -897,16 +1072,18 @@ class Compiler extends SqlRuntime {
                     case null: TUnknown;
                     case c: c.type;
                 }
+                
 
             case TFunc(f):
-                // throw new pm.Error('TODO');
+                throw new pm.Error('Unreachable');
                 
             case TTable(name):
-                // throw new pm.Error('TODO');
+				throw new pm.Error('Unreachable');
                 
             case TField(o, field):
-                // throw new pm.Error('TODO');
                 typeExpr(o);
+                // throw new pm.Error('TODO');
+                Console.error('type TField($o, $field)');
                 
             case TCall(f, params):
                 typeExpr(f);
@@ -915,9 +1092,51 @@ class Compiler extends SqlRuntime {
                 
             case TConst(_):
                 e.type = exprt(e);
-            case TArrayDecl(_)://TODO
-            case TObjectDecl(_)://TODO
+            
+            case TArray(array, index):
+                typeExpr(array);
+                typeExpr(index);
+                e.type = switch array.type {
+                    case TArray(itemType): 
+                        // index.typeHint = TInt;
+                        itemType;
+                    case TMap(keyType, valueType):
+                        // index.typeHint = keyType;
+                        valueType;
+                    case TUnknown:
+                        TUnknown;
+                    default:
+                        throw new pm.Error('Unhandled ${array.type}');
+                }
+
+            case TCase(Standard(branches, def)):
+                for (b in branches) {
+                    typeSelPredicate(b.e);
+                    typeExpr(b.result);
+                }
+                var t:SType = null;
+                for (b in branches) {
+                    if (t == null)
+                        t = b.result.type;
+                    else {
+                        if (b.result.type.eq(t))
+                            continue;
+                        else
+                            throw new pm.Error('TypeMismatch($t, ${b.result.type})');
+                    }
+                }
+                if (def != null) {
+                    typeExpr(def);
+                }
+                if (t != null)
+                    e.type = t;
+
+            case other:
+                throw new pm.Error('Unhandled $e');
         }
+
+        if (e.type == TUnknown)
+            Console.error('`${e.print()}` is untyped');
     }
 
 	/**
@@ -942,6 +1161,8 @@ class Compiler extends SqlRuntime {
 			case TTable(name):
 				throw new pm.Error.NotImplementedError();
 			case TField(o, field):
+                throw new pm.Error.NotImplementedError();
+            case TArray(_, _):
 				throw new pm.Error.NotImplementedError();
 			case TFunc(f):
 				throw new pm.Error.NotImplementedError();
@@ -954,6 +1175,8 @@ class Compiler extends SqlRuntime {
 			case TArrayDecl(_):
 				throw new pm.Error.NotImplementedError();
 			case TObjectDecl(_):
+                throw new pm.Error.NotImplementedError();
+            case TCase(t):
 				throw new pm.Error.NotImplementedError();
 		}
 	}
@@ -1031,11 +1254,41 @@ class Compiler extends SqlRuntime {
         }
     }
 
+    function compileInsertStmt(insert: InsertStatement):InsertStmt {
+        // throw 'ass';
+        var rows = [];
+        for (x in insert.values) {
+            rows.push([for (e in x) compileExpression(e)]);
+        }
+        return new InsertStmt(insert.target, insert.columns, rows);
+    }
+
+	function compileUpdateStmt(update:UpdateStatement):UpdateStmt {
+		var ops = update.operations.map(op -> updateOpConvert(op));
+		for (op in ops) {
+			compileUpdateOp(op);
+        }
+        var predicate = update.where != null ? compileSelectPredicate(update.where) : null;
+        var stmt = new UpdateStmt(new TablePath(update.target.tableName), ops, predicate);
+        stmt.context = new UpdateStmtContext(this.context);
+
+        return stmt;
+    }
+    
+    function compileUpdateOp(op: UpdateOperation) {
+        compileTExpr(op.e);
+    }
+
     function getTableSchema(name: String):Null<SqlSchema<Dynamic>> {
-        // Console.examine(name);
         return context.getTableSchema(name);
     }
     function getColumnField(name:String, ?table:String) {
         return context.getColumnField(name, table);
     }
+
+    inline function symbol(s:String, ?pos:haxe.PosInfos):SqlSymbol {
+        return if (s.empty()) null else new SqlSymbol(s.unwrap('unwrap failed', pos));
+    }
 }
+
+private typedef Predicate = Expr;
