@@ -3,6 +3,7 @@ package ql.sql.runtime;
 // import ql.sql.runtime.Sel.Context;
 // import ql.sql.runtime.Sel.Scope;
 
+import ql.sql.common.index.IndexCache;
 import ql.sql.grammar.CommonTypes.Contextual;
 import haxe.ds.ReadOnlyArray;
 import ql.sql.runtime.Stmt.SelectStmt;
@@ -507,14 +508,33 @@ class Context<TDb, Table, Row> {
 		throw new pm.Error(n, 'NotFound');
 	}
 
+	/**
+	 * attempts to resolve any given value to a reference to a Table object
+	 * if `r` is `null`, `null` is returned
+	 * if `r` is already a `Table` reference, return `r`
+	 * if `r` is a `TableSpec` object, its `src` field is followed until its `table` field can be returned
+	 * if `r` is a `String`, attempt to load a/the table whose name is `r` in the current context
+	 * @param r any value for which `resolveTableFrom`'s behavior is specified
+	 * @return Null<Table>
+	 * @see TableSpec
+	 */
 	public function resolveTableFrom(r: Dynamic):Null<Table> {
 		if (r == null) return null;
 		if (glue.valIsTable(r)) return cast r;
 
 		if ((r is TableSpec)) {
 			var t:TableSpec = cast r;
-			t.table = resolveTableFrom(t.table);
-			return t.table;
+			while (t.src != null) {
+				t = t.src;
+				// return resolveTableFrom(t.src);
+			}
+
+			if (t.table != null) {
+				return t.table = resolveTableFrom(t.table);
+			}
+			
+			// return t.table;
+			throw new pm.Error('$t cannot be resolved to a table reference');
 		}
 
 		if ((r is String)) {
@@ -524,10 +544,15 @@ class Context<TDb, Table, Row> {
 				return resolveTableFrom(src);
 			}
 			catch (error: pm.Error) {
-				if (error.name == 'NotFound' || error.name == 'NullIsBadError') {
-					throw new pm.Error(s, 'NotFound');
-				}
-				throw error;
+				// if (error.name == 'NotFound' || error.name == 'NullIsBadError') {
+				// 	throw new pm.Error(s, 'NotFound');
+				// }
+				// throw error;
+			}
+
+			var tbl:Null<Table> = glue.dbLoadTable(this.database, s);
+			if (tbl != null) {
+				return resolveTableFrom(tbl);
 			}
 		}
 
@@ -773,45 +798,6 @@ class PmdbContext extends Context<Dynamic, Dynamic, Dynamic> {
 
 	function init() {
 		trace('TODO');
-	}
-}
-
-class DummyGlue<Row> extends Glue<ql.sql.Dummy.AbstractDummyDatabase<ql.sql.Dummy.DummyTable<Row>, Row>, ql.sql.Dummy.DummyTable<Row>, Row> {
-	public function new(db) {
-		super();
-		this.database = db;
-	}
-
-	extern inline function doc(row: Row):Doc {
-		return Doc.unsafe(row);
-	}
-
-	override function dbLoadTable(db:ql.sql.Dummy.AbstractDummyDatabase<ql.sql.Dummy.DummyTable<Row>, Row>, table:String) {
-		return this.table = (db.nor(this.database).table(table));
-	}
-
-	override function dbListTables(db:AbstractDummyDatabase<DummyTable<Row>, Row>):Array<String> {
-		return db.tables.keyArray();
-	}
-
-	override function rowGetColumnByName(row:Row, name:String):Dynamic {
-		return doc(row).get(name);
-	}
-
-	override function tblGetAllRows(table: ql.sql.Dummy.DummyTable<Row>):Array<Row> {
-		return table.getAllData();
-	}
-
-	override function tblGetSchema(table: ql.sql.Dummy.DummyTable<Row>):SqlSchema<Row> {
-		return table.schema;
-	}
-
-	override function tblUpdate(tbl:DummyTable<Row>, oldRows:Array<Row>, newRows:Array<Row>) {
-		tbl.update(oldRows, newRows);
-	}
-
-	override function valIsTable(v:Dynamic):Bool {
-		return (v is ql.sql.DummyTable<Dynamic>);
 	}
 }
 

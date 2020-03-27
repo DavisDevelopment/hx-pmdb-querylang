@@ -1,5 +1,7 @@
 package ql.sql.runtime;
 
+import ql.sql.Dummy;
+import ql.sql.common.index.IndexCache;
 import ql.sql.Dummy.TableHandle;
 import pmdb.core.Store;
 import ql.sql.Dummy.AbstractDummyDatabase;
@@ -39,7 +41,11 @@ class Glue<TDb, Table, Row> {
 
 	public function tblGetSchema(table:Table):SqlSchema<Row> {
 		throw new pm.Error.ValueError(Glue.NotFound, 'error msg');
-    }
+	}
+	
+	public function tblGetIndexCache(table: Table):IndexCache<Row> {
+		throw new pm.Error.ValueError(Glue.NotFound, 'error msg');
+	}
     
     public function tblUpdate(tbl:Table, oldRows:Array<Row>, newRows:Array<Row>):Void {
 		throw new pm.Error.ValueError(Glue.NotFound, 'error msg');
@@ -126,4 +132,48 @@ class PmdbGlue extends Glue<AbstractDummyDatabase<TableHandle<Dynamic>, Dynamic>
     override function valIsTable(v:Dynamic):Bool {
         return (v is Store<Dynamic>);
     }
+}
+
+class DummyGlue<Row> extends Glue<ql.sql.Dummy.AbstractDummyDatabase<ql.sql.Dummy.DummyTable<Row>, Row>, ql.sql.Dummy.DummyTable<Row>, Row> {
+	public function new(db) {
+		super();
+		this.database = db;
+	}
+
+	extern inline function doc(row:Row):Doc {
+		return Doc.unsafe(row);
+	}
+
+	override function dbLoadTable(db:ql.sql.Dummy.AbstractDummyDatabase<ql.sql.Dummy.DummyTable<Row>, Row>, table:String) {
+		return this.table = (db.nor(this.database).table(table));
+	}
+
+	override function dbListTables(db:AbstractDummyDatabase<DummyTable<Row>, Row>):Array<String> {
+		return db.tables.keyArray();
+	}
+
+	override function rowGetColumnByName(row:Row, name:String):Dynamic {
+		return doc(row).get(name);
+	}
+
+	override function tblGetAllRows(table:ql.sql.Dummy.DummyTable<Row>):Array<Row> {
+		return table.getAllData();
+	}
+
+	override function tblGetSchema(table:ql.sql.Dummy.DummyTable<Row>):SqlSchema<Row> {
+		return table.schema;
+	}
+
+	override function tblGetIndexCache(table:DummyTable<Row>):IndexCache<Row> {
+		// return super.tblGetIndexCache(table);
+		return table.cache;
+	}
+
+	override function tblUpdate(tbl:DummyTable<Row>, oldRows:Array<Row>, newRows:Array<Row>) {
+		tbl.update(oldRows, newRows);
+	}
+
+	override function valIsTable(v:Dynamic):Bool {
+		return (v is ql.sql.DummyTable<Dynamic>);
+	}
 }
