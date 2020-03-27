@@ -287,8 +287,8 @@ class TExpr {
         this.type = TUnknown;
 
         switch expr {
-            case TConst({value:v, type:t}):
-                this.mConstant = v;
+            case TConst(tv={type:t}):
+                this.mConstant = tv.export();
                 this.type = t;
 
             default:

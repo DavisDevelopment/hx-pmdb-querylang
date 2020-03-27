@@ -1131,6 +1131,16 @@ class Compiler extends SqlRuntime {
                 if (t != null)
                     e.type = t;
 
+            case TArrayDecl(values):
+                for (v in values)
+                    typeExpr(v);
+                var t:SType = null;
+                for (v in values) {
+                    if (t == null || t.eq(v.type))
+                        continue;
+                    throw new pm.Error('TypeMismatch($t, ${v.type})');
+                }
+
             case other:
                 throw new pm.Error('Unhandled $e');
         }
