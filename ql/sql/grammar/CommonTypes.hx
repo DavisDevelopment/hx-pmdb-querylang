@@ -136,6 +136,7 @@ enum BinaryOperator {
 	OpLt;
 	OpLte;
 	OpNEq;
+	OpIn;
 	// OpCmp;//?
 	OpMult;
 	OpDiv;
