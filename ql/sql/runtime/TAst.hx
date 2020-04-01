@@ -556,7 +556,13 @@ class TExprTypeTools {
         return b.toString();
     }
 
+    /**
+     * prints the string representation of `e` to the given `StringBuf`
+     * @param e 
+     * @param out the output buffer
+     */
     public static function printExpr(e:TExprType, out:StringBuf) {
+        final len1 = out.length;
         inline function add(s:String) {
             out.addSub(s, 0);
         }
@@ -564,26 +570,39 @@ class TExprTypeTools {
         switch e {
             case TConst(value): 
                 add(tvprint(value));
+            
             case TParam(name): 
                 var s = ':${name.label}';
                 add(s);
+            
             case TTable(name), TReference(name):
                 var s = name.identifier;
                 add(s);
-            case TColumn(name, _.label()=>table):
-                var s = table!=null?table + '.':'' + name.identifier;
-                add(s);
+            
+            case TColumn(_.label()=>name, _.label()=>table):
+                if (table.empty()) {
+                    add(name);
+                }
+                else {
+                    add(table);
+                    add('.');
+                    add(name);
+                }
+            
             case TField(o, field):
                 printExpr(o.expr, out);
                 add('.$field');
+            
             case TArray(arr, idx):
                 printExpr(arr.expr, out);
                 add('[');
                 printExpr(idx.expr, out);
                 add(']');
+            
             case TFunc(f):
                 var s = f.id;
                 add(s);
+            
             case TCall(f, params):
                 printExpr(f.expr, out);
                 add('(');
@@ -600,10 +619,12 @@ class TExprTypeTools {
                     printExpr(params[0].expr, out);
                 }
                 add(')');
+            
 			case TBinop(op, _.expr => left, _.expr =>right):
                 printExpr(left, out);
                 add(printbinop(op));
                 printExpr(right, out);
+            
             case TUnop(op, post, e):
                 // post ? print(e.expr)+printunop(op) : printunop(op)+print(e.expr);
                 if (post) {
@@ -614,8 +635,18 @@ class TExprTypeTools {
                     printExpr(e.expr, out);
                     add(printunop(op));
                 }
+            
             case TArrayDecl(values):
                 // '(${values.map(e -> print(e.expr)).join(',')})';
+                var last = values[values.length - 1];
+                add('[');
+                for (i in 0...(values.length - 1)) {
+                    printExpr(values[i].expr, out);
+                    add(',');
+                }
+                printExpr(last.expr, out);
+                add(']');
+            
             case TObjectDecl(fields):
                 // "{" + fields.map(function(_) {
                 //     return print(TConst(_.key)) + ': ' + print(_.value.expr);
@@ -629,7 +660,10 @@ class TExprTypeTools {
                         throw new pm.Error('CASE');
                 }
         }
-        return ;
+        // return ;
+
+        if (out.length > len1)
+            return ;
 
         throw new pm.Error('Unhandled $e');
     }
