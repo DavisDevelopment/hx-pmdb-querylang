@@ -312,13 +312,31 @@ class SqlRuntime {
 
 			case EBinop(op, l, r):
 				var left = enc(l), right = enc(r);
-				switch op {
-					case _:
-						return te(TBinop(BinaryOperator.createByName('Op${op.getName()}'), left, right));
-				}
+				var op2:BinaryOperator = switch op {
+					case Eq: OpEq;
+					case NEq: OpNEq;
+					case In: OpIn;
+					case Like:  throw new pm.Error('TODO: $op');
+					case Match: throw new pm.Error('TODO: $op');
+					case Add: OpAdd;
+					case Sub: OpSubt;
+					case Div: OpDiv;
+					case Mult: OpMult;
+					case Mod: OpMod;
+					case Gt: OpGt;
+					case Gte: OpGte;
+					case Lt: OpLt;
+					case Lte:OpLte;
+					case LogAnd: OpBoolAnd;
+					case LogOr: OpBoolOr;
+				};
+
+				return te(TBinop(op2, left, right));
+
 			case EUnop(op, postfix, e):
 				var unop = UnaryOperator.createByName('Op${op.getName()}');
 				return te(TUnop(unop, postfix, enc(e)));
+			
 			case ETernary(cond, t, f):
 				throw new pm.Error.NotImplementedError();
 			case EArray(a, idx):
