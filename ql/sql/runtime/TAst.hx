@@ -642,6 +642,7 @@ class TExprTypeTools {
             case OpLt:'<';
             case OpLte:'<=';
             case OpNEq:'!=';
+            case OpIn: 'IN';
             case OpMult:'*';
             case OpDiv:'/';
             case OpMod:'%';

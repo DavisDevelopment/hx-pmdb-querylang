@@ -723,7 +723,8 @@ class Compiler extends SqlRuntime {
         //*[Probably Useless(?)]
         e.extra.set('compilationLevel', 1);
 
-		typeExpr(e);
+        typeExpr(e);
+        Console.examine(e.type);
     }
 
     /**
@@ -977,7 +978,7 @@ class Compiler extends SqlRuntime {
         typeExpr(right);
         var types = [left.type, right.type];
         switch op {
-            case OpEq, OpGt, OpGte, OpLt, OpLte, OpNEq:
+            case OpEq, OpGt, OpGte, OpLt, OpLte, OpNEq, OpIn:
                 return TBool;
             case OpAdd:
                 return switch types {

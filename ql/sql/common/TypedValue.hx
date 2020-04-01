@@ -509,6 +509,7 @@ class BinaryOperators {
 			case OpLt: op_lt;
 			case OpLte: op_lte;
 			case OpNEq: op_neq;
+			case OpIn: op_in;
 			case OpMult: op_mult;
 			case OpDiv: op_div;
 			case OpMod: op_mod;
@@ -528,6 +529,7 @@ class BinaryOperators {
 			case OpLt: op_lt(l, r);
 			case OpLte: op_lte(l, r);
 			case OpNEq: op_neq(l, r);
+			case OpIn: op_in(l, r);
 			case OpMult: op_mult(l, r);
 			case OpDiv: op_div(l, r);
 			case OpMod: op_mod(l, r);
@@ -546,6 +548,10 @@ class BinaryOperators {
 	// public static function op_x(l:Dynamic, r:Dynamic):Dynamic {return top_x(TypedValue.ofAny(l), TypedValue.ofAny(r)).export();}
 	public static function op_eq(l:Dynamic, r:Dynamic):Dynamic {
 		return top_eq(TypedValue.ofAny(l), TypedValue.ofAny(r)).export();
+	}
+
+	public static function op_in(l:Dynamic, r:Dynamic):Dynamic {
+		throw new pm.Error.NotImplementedError();
 	}
 
 	public static function op_gt(l:Dynamic, r:Dynamic):Dynamic {
