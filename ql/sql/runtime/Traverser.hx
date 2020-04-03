@@ -271,6 +271,112 @@ class Traverser {
 		return candidateCount;
 	}
 
+//{region callback_api
+
+	public dynamic function computeCandidatesIOC(sel:Sel<Dynamic, Dynamic, Dynamic>, g:Contextual, output:(Dynamic, offset:Int)->Void, ?filter:Null<JITFn<Bool>>, ?interp:Interpreter, ?flags:{?streamed:Bool}):Int {
+		/**
+		 * TODO
+		 *   refactor to use callbacks to aid clarity of control flow, and reduce repetition of heavyweight context-modifying method-calls
+		 */
+		if (flags == null)
+			flags = {streamed: false};
+
+		final c = g.context;
+		final src = sel.source;
+
+		// process flags
+		final STREAMED = nor(flags.streamed, false); // TODO also automatically decide whether to stream based on data sizessd
+		
+		var candidates:Array<Dynamic> = [];//array that rows are buffered into to be processed in the second stage
+		var candidateCount:Int = -1;// the number of items that have been pushed onto `candidates`
+		var proceed:Bool = true;// at a given step in this function, denotes whether there is still for further steps
+		var sourceNames:Array<String> = [src.getName(g.context)];// list of ids for query-sources used in this SELECT
+
+		if (proceed && src.joins != null) {// this query has one or more JOIN clause
+			final join = src.joins[0].unwrap();
+			var jsrc = join.mJoinWith;
+			if (jsrc == null)
+				throw new pm.Error('Missing source item');
+			sel.context.addSource(jsrc.src);
+			sourceNames.push(jsrc.src.name);
+
+			switch join.joinType {
+				case Cross:// for now, cross-joins are just not supported because I won't have much need of them and they're slow (sorry)
+					throw new pm.Error.NotImplementedError();
+
+				case Inner:
+					/*TODO fix this mess :c*/
+					var l = [], r = [];
+					src.getSpec(c).dump(g, l);
+					jsrc.src.dump(g, r);
+
+					//FIXME filter is declared every time, whether it's necessary or not.
+					var filter:JITFn<Bool> = function(g:Contextual) {
+						return join.on != null ? (interp != null ? interp.pred(join.on) : join.on.eval(g)) : true;
+					};
+
+					//TODO implement ability to override the iteration behavior here
+					for (leftRow in l) {
+						for (rightRow in r) {
+							var row = [leftRow, rightRow];
+							//FIXME if filter isn't used, focusRows need not be invoked here, but filter is used every time
+							focusRows(g, row, sourceNames);
+							if (filter(g)) {
+								candidates.push(row);
+								candidateCount++;
+							}
+						}
+					}
+
+				default:
+					throw new pm.Error('TODO: Implement ${join.joinType}');
+			}
+			proceed = false;
+		}
+
+		if (proceed) {
+			if (STREAMED) {
+				for (item in src.getSpec(c).open(g)) {
+					candidates[candidateCount++] = item;
+					// output(item, candidateCount++);
+				}
+			} 
+			else {
+				candidateCount = src.getSpec(c).dump(g, candidates);
+				// var i = 0;
+				// while (i < candidateCount) {
+				// 	output(candidates[i], i);
+				// 	i++;
+				// }
+			}
+		}
+
+		if (candidateCount == -1)
+			throw new pm.Error('Unhandled');
+
+		if (filter == null) {
+			var i = 0;
+			while (i < candidateCount) {
+				output(candidates[i], i++);
+			}
+		} 
+		else {
+			var i = 0;
+			while (i < candidateCount) {
+				final step:Dynamic = candidates[i];
+				focusRows(g, step, sourceNames);
+				if (filter(g)) {
+					output(step, i);
+				}
+				i++;
+			}
+		}
+
+		return candidateCount;
+	}
+
+//}endregion
+
 	public static function focusRows(g:Contextual, rowItem:Dynamic, sourceNames:Array<String>) {
 		if ((rowItem is Array<Dynamic>)) {
 			final a = cast(rowItem, Array<Dynamic>);
