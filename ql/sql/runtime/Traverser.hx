@@ -123,10 +123,17 @@ class Traverser {
 		?interp:Interpreter,
 		?flags:{?streamed:Bool}
 	):Int {
-		if (flags == null) flags = {};
+		/**
+		 * TODO
+		 *   refactor to use callbacks to aid clarity of control flow, and reduce repetition of heavyweight context-modifying method-calls
+		 */
+		if (flags == null) flags = {streamed:false};
 
 		final c = g.context;
 		final src = sel.source;
+
+		// process flags
+		final STREAMED = nor(flags.streamed, false);//TODO also automatically decide whether to stream based on data sizessd
 
 		// var itr:() -> Iterator<Dynamic> = () -> src.getSpec(c).open(g);
 		var candidates: Array<Dynamic> = [];
@@ -134,9 +141,6 @@ class Traverser {
 		var proceed:Bool = true;
 		var sourceNames:Array<String> = [src.getName(g.context)];
 
-		/**
-		 * TODO fix this horseshit
-		 */
 		if (proceed && src.joins != null) {
 			final join = src.joins[0].unwrap();
 			var jsrc = join.mJoinWith;
@@ -144,46 +148,60 @@ class Traverser {
 				throw new pm.Error('Missing source item');
 			sel.context.addSource(jsrc.src);
 			sourceNames.push(jsrc.src.name);
-			var itr:()->Iterator<Dynamic>;
+			// var itr:()->Iterator<Dynamic>;
+
 			switch join.joinType {
 				case Cross:
-					final joinIter:() -> Iterator<Dynamic> = () -> jsrc.src.open(g);
-					var srcIter:() -> Iterator<Dynamic> = itr;
-
-					#if (js || neko || py)
-					itr = () -> Traverser.nestedLoopCrossJoinItr(g, sourceNames, srcIter, joinIter);
-					#else
-					itr = () -> Traverser.nestedLoopCrossJoin(g, sourceNames, srcIter, joinIter);
-					#end
+					throw new pm.Error.NotImplementedError();
 
 				case Inner:
-					final joinIter = () -> jsrc.src.open(g);
-					var srcIter:() -> Iterator<Dynamic> = itr;
+					// final joinIter = () -> jsrc.src.open(g);
+					// var srcIter:() -> Iterator<Dynamic> = itr;
+					var l = [], r = [];
+					src.getSpec(c).dump(g, l);
+					jsrc.src.dump(g, r);
 
 					var filter:JITFn<Bool> = function(g:Contextual) {
 						return join.on != null ? (interp != null ? interp.pred(join.on) : join.on.eval(g)) : true;
 					};
 
-					#if (js || neko || py)
+					/* #if (js || neko || py)
 					itr = () -> Traverser.nestedLoopInnerJoinItr(g, sourceNames, srcIter, joinIter, filter);
 					#else
 					itr = () -> Traverser.nestedLoopInnerJoin(g, sourceNames, srcIter, joinIter, filter);
-					#end
+					#end */
+					for (leftRow in l) {
+						for (rightRow in r) {
+							var row = [leftRow, rightRow];
+							focusRows(g, row, sourceNames);
+							if (filter(g)) {
+								candidates.push(row);
+								candidateCount++;
+							}
+						}
+					}
 
 				default:
 					throw new pm.Error('TODO: Implement ${join.joinType}');
 			}
 
-			for (item in itr()) {
-				candidates.push(item);
-				candidateCount++;
-			}
+			// for (item in itr()) {
+			// 	candidates.push(item);
+			// 	candidateCount++;
+			// }
 
 			proceed = false;
 		}
 
 		if (proceed) {
-			candidateCount = src.getSpec(c).dump(g, candidates);
+			if (STREAMED) {
+				for (item in src.getSpec(c).open(g)) {
+					candidates[candidateCount++] = item;
+				}
+			}
+			else {
+				candidateCount = src.getSpec(c).dump(g, candidates);
+			}
 		}
 
 		/* if (proceed && src.joins != null) {
@@ -230,7 +248,7 @@ class Traverser {
 		// return itr();
 		if (candidateCount == -1)
 			throw new pm.Error('Unhandled');
-		
+
 		if (filter == null) {
 			var i = 0;
 			while (i < candidates.length) {

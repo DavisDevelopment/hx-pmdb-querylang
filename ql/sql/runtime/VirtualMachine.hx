@@ -740,16 +740,20 @@ class TableSpec {
 		return openItr(g);
 	}
 
-	public function dump(g:Contextual, ?output:Array<Dynamic>):Int {
+	public function dump(g:Contextual, output:Array<Dynamic>):Int {
 		var count:Int = 0;
 		if (output == null)
-			output = new Array();
-		if (src != null) return src.dump(g, output);
+			throw new pm.Error();
+		if (src != null) 
+			return src.dump(g, output);
+
 		if (table != null) {
 			var all = g.context.glue.tblGetAllRows(table);
-			all.blit(0, output, 0, all.length);
+			for (i in 0...all.length)
+				output[i] = all[i];
 			return all.length;
 		}
+
 		if (stream != null) {
 			var it = stream.open(g);
 			for (item in it) {
@@ -758,6 +762,7 @@ class TableSpec {
 			}
 			return count;
 		}
+		
 		return count;
 	}
 
