@@ -1,5 +1,6 @@
 package ql.sql.runtime;
 
+import ql.sql.runtime.plan.SelectPlan;
 import haxe.Constraints.Function;
 import ql.sql.runtime.sel.SelectStmtContext;
 import ql.sql.runtime.Stmt.SelectStmt;
@@ -17,8 +18,8 @@ import ql.sql.runtime.VirtualMachine;
 // import ql.sql.runtime.
 import ql.sql.runtime.Traverser;
 
-import pm.Helpers.nor;
-import pm.Helpers.nn;
+// import pm.Helpers.nor;
+import pm.Helpers.*;
 
 using pm.Functions;
 
@@ -39,7 +40,9 @@ class Sel<Table, Row, ResultRow> extends StmtNode<Array<ResultRow>> {
 	public final sourceSchema:SqlSchema<Row>;
     public final resultSchema:SqlSchema<ResultRow>;
     
-	public final i:SelectImpl;
+    public final i:SelectImpl;
+    
+    public var plan:SelectPlan<Table, Row, ResultRow> = null;
 
 	/**
 	 * construct, boo
@@ -137,14 +140,11 @@ class SelectImpl {
     public var _traverser:Null<Traverser> = null;
     public var order: Null<Array<{accessor:TExpr, direction:Int}>> = null;
 
-    public function new(sel, ?stmt:SelectStatement, ?p:SelPredicate, ?e:SelOutput) {
+    public function new(?stmt:SelectStatement, ?p:SelPredicate, ?e:SelOutput) {
         if (stmt != null) _stmt = stmt;
         if (p != null) _predicate = p;
         if (e != null) _exporter = e;
         _traverser = new Traverser();
-        _traverser.iter = function(sel, source, f) {
-            sel.context.context.glue.tblGetAllRows(source).iter(f);
-        };
     }
 
     function sort_(g:Contextual, arr:Array<Doc>) {
@@ -169,31 +169,31 @@ class SelectImpl {
     }
 
     public function apply(sel:Sel<Dynamic, Dynamic, Dynamic>, ?interp:Interpreter) {
-        final isSimpleSelect = true;//placeholder for variable determining whether or not aggregate functions are used in the selection
+        return applyNaive(sel, interp);
+    }
 
+    /**
+     * get 'r dun
+     * @param sel 
+     * @param interp 
+     */
+    public function applyNaive(sel:Sel<Dynamic, Dynamic, Dynamic>, ?interp:Interpreter) {
         var g:SelectStmtContext<Dynamic, Dynamic, Dynamic> = sel.context;
         if (g.sources.length == 0)
             g.addSource(sel.source.getSpec(g.context));
-            // g.sources = [sel.source.getSpec(g.context)];
 
-        var acc:Array<Dynamic> = new Array();
-        var input:Iterator<Dynamic>;// the iterator object to be walked over
-
+        var output:Array<Dynamic> = new Array();
+        
+//{region callbacks
         /**
          * the function that transforms the source row(s) into the result (output) row
          */
-        var extract;
-        extract = function(g: Contextual):Dynamic {
-            // g.context.focus(, sel.source.getName(g.context));
-            return _exporter.mCompiled(g);
-        };
-        if (nn(interp)) {
-            extract = o -> interp.buildSelectStmtResultRow(cast sel);
-        }
+         var extract;
+         extract = nn(interp) ? o -> interp.buildSelectStmtResultRow(cast sel) : o -> _exporter.mCompiled(o);
         if ((_exporter.items : pm.ImmutableList.ListRepr<SelItem>).match(Hd(All(null), Tl))) {
             extract = o -> o.context.getCurrentRow();
         }
-
+        
         /**
          * the function that determines whether a row is processed further
          */
@@ -202,56 +202,66 @@ class SelectImpl {
             test = nn(interp) ? g->interp.pred(_predicate) : (_predicate.mCompiled !=  null ? g->_predicate.mCompiled(g) : g->_predicate.eval(g));
         else
             test = g->true;
+//}endregion
         
-        input = _traverser.iterator(sel, g, test, extract, interp);
-
-
-        // for (src in g.sources) {
-            // g.context.use(src);
-            // }
+        // // var input:Iterator<Dynamic>; // the iterator object to be walked over
+        // // input = _traverser.iterator(sel, g, test, extract, interp);
+        var input = new Array();//allocate new array to hold candidate rows
+        
+        // scoping doodads
         final c = g.context;
         c.beginScope();
         c.pushSourceScope(cast g.sources.sources);
         if (g.sources.length == 1) {
             c.use(g.sources.sources[0]);
         }
-
+        
         var outputSources = sel.getSourcesUsedInOutput();
+        var sourceNames = outputSources.map(src -> src.name);
 
+        _traverser.computeCandidates(sel, g, input, test, interp);// actually compute the content of `input`
+        
         for (item in input) {
-            var rows:Array<Dynamic>;
+            /* // var rows:Array<Dynamic> = (rowsBuf==null?rowsBuf=[]:rowsBuf);
             if ((item is Array<Dynamic>)) {
-                rows = cast item;
-            }
-            else {
-                rows = [item];
-            }
+                final a = cast(item, Array<Dynamic>);
+                // if (rows.length == 0) rows.resize(a.length);
+                if (rowCount == -1) rowCount = a.length;
+                else assert(rowCount == a.length, '${rowCount} != ${a.length}');
 
-            #if debug
-            if (rows.length != outputSources.length) {
-                null;
-                //! may indicate a problem
-            }
-            #end
+                // a.blit(0, rows, 0, a.length);
+                for (i in 0...rowCount) {
+                    // var row:Dynamic = rows[i];
+                    var src:TableSpec = outputSources.sources[i];
 
-            for (i in 0...rows.length) {
-                var row:Dynamic = rows[i];
-                var src:TableSpec = outputSources.sources[i];
-
-                if (src != null) {
-                    g.context.focus(row, src.name);
+                    if (src != null) {
+                        g.context.focus(a[i], src.name);
+                    }
                 }
             }
+            else {
+                // rows[0] = item;
+                // assert(rows.length == 1);
+                var row:Dynamic = item;
+                var src = outputSources.sources[0];
+                if (src != null)
+                    g.context.focus(row, src.name);
+                else if (g.context.unaryCurrentRow)
+                    g.context.focus(row);
+            } */
+
+            Traverser.focusRows(g, item, sourceNames);
 
             if (test(g)) {
-                acc.push(extract(g));
+                output.push(extract(g));
             }
         }
 
         c.popSourceScope();
         c.endScope();
+        // scope exited
 
-        return acc;
+        return output;
     }
 }
 
@@ -409,3 +419,7 @@ class TableStream {
         }
     }
 }
+
+typedef Itr<T> = Iterator<T> & {
+    function reset():Void;
+};

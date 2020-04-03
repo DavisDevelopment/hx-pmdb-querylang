@@ -711,7 +711,6 @@ class TableSpec {
 	public var name:String;
 	public var schema:SqlSchema<Dynamic>;
 	public var stream: TableStream;
-	//// public var alias:Null<String> = null;
 	public var table:Null<Dynamic> = null;
 	public var stmt:Null<SelectStmt> = null;
 	public var src(default, set): Null<TableSpec> = null;
@@ -727,15 +726,6 @@ class TableSpec {
 		if (data.src != null) src = data.src;
 		if (data.stmt != null) stmt = data.stmt;
 		if (data.table != null) table = data.table;
-
-		// switch data {
-		// 	case {stmt: null, table: null}:
-		// 		Console.examine(stream);
-		// 	case {stmt:q, table:_} if (q != null):
-		// 		nestedQuery = q;
-		// 	case {table:table}:
-		// 		this.table = table;
-		// }
 	}
 
 	/**
@@ -749,6 +739,28 @@ class TableSpec {
 		assert(!pmdb.core.Arch.areThingsEqual(a, b), new pm.Error('$a == $b'));
 		return openItr(g);
 	}
+
+	public function dump(g:Contextual, ?output:Array<Dynamic>):Int {
+		var count:Int = 0;
+		if (output == null)
+			output = new Array();
+		if (src != null) return src.dump(g, output);
+		if (table != null) {
+			var all = g.context.glue.tblGetAllRows(table);
+			all.blit(0, output, 0, all.length);
+			return all.length;
+		}
+		if (stream != null) {
+			var it = stream.open(g);
+			for (item in it) {
+				count++;
+				output.push(item);
+			}
+			return count;
+		}
+		return count;
+	}
+
 	 function openItr(g: Contextual):Iterator<Dynamic> {
 		var it = switch this {
 			case {src: null, table: null, stream: null}:

@@ -15,7 +15,7 @@ import ql.sql.grammar.CommonTypes.SqlSymbol;
 import ql.sql.ast.Query.SelectStatement;
 import ql.sql.runtime.VirtualMachine;
 // import ql.sql.runtime.
-import pm.Helpers.nor;
+import pm.Helpers.*;
 import pm.Helpers.nn;
 
 using pm.Functions;
@@ -103,6 +103,175 @@ class Traverser {
 		}
 
 		return itr();
+	}
+
+	/**
+	 * build array of candidate rows to be processed
+	 * @param sel the `SelectStmt` instance this Traverser belongs to
+	 * @param g
+	 * @param output
+	 * @param filter (when one exists) the function to be invoked to obtain the boolean value determining whether the currently focused row is operated upon
+	 * @param interp (when being called by `Interpreter`) the Interpreter instance executing the statement
+	 * @return Int
+	 */
+	public dynamic function computeCandidates(
+		sel:Sel<Dynamic, Dynamic, Dynamic>, 
+		g:Contextual, 
+		output:Array<Dynamic>,
+		?filter:Null<JITFn<Bool>>, 
+		// ?extract:JITFn<Dynamic>, 
+		?interp:Interpreter,
+		?flags:{?streamed:Bool}
+	):Int {
+		if (flags == null) flags = {};
+
+		final c = g.context;
+		final src = sel.source;
+
+		// var itr:() -> Iterator<Dynamic> = () -> src.getSpec(c).open(g);
+		var candidates: Array<Dynamic> = [];
+		var candidateCount:Int = -1;
+		var proceed:Bool = true;
+		var sourceNames:Array<String> = [src.getName(g.context)];
+
+		/**
+		 * TODO fix this horseshit
+		 */
+		if (proceed && src.joins != null) {
+			final join = src.joins[0].unwrap();
+			var jsrc = join.mJoinWith;
+			if (jsrc == null)
+				throw new pm.Error('Missing source item');
+			sel.context.addSource(jsrc.src);
+			sourceNames.push(jsrc.src.name);
+			var itr:()->Iterator<Dynamic>;
+			switch join.joinType {
+				case Cross:
+					final joinIter:() -> Iterator<Dynamic> = () -> jsrc.src.open(g);
+					var srcIter:() -> Iterator<Dynamic> = itr;
+
+					#if (js || neko || py)
+					itr = () -> Traverser.nestedLoopCrossJoinItr(g, sourceNames, srcIter, joinIter);
+					#else
+					itr = () -> Traverser.nestedLoopCrossJoin(g, sourceNames, srcIter, joinIter);
+					#end
+
+				case Inner:
+					final joinIter = () -> jsrc.src.open(g);
+					var srcIter:() -> Iterator<Dynamic> = itr;
+
+					var filter:JITFn<Bool> = function(g:Contextual) {
+						return join.on != null ? (interp != null ? interp.pred(join.on) : join.on.eval(g)) : true;
+					};
+
+					#if (js || neko || py)
+					itr = () -> Traverser.nestedLoopInnerJoinItr(g, sourceNames, srcIter, joinIter, filter);
+					#else
+					itr = () -> Traverser.nestedLoopInnerJoin(g, sourceNames, srcIter, joinIter, filter);
+					#end
+
+				default:
+					throw new pm.Error('TODO: Implement ${join.joinType}');
+			}
+
+			for (item in itr()) {
+				candidates.push(item);
+				candidateCount++;
+			}
+
+			proceed = false;
+		}
+
+		if (proceed) {
+			candidateCount = src.getSpec(c).dump(g, candidates);
+		}
+
+		/* if (proceed && src.joins != null) {
+			final join = src.joins[0].unwrap();
+			var jsrc = join.mJoinWith;
+			if (jsrc == null)
+				throw new pm.Error('Missing source item');
+			// sel.context.sources.push(jsrc.src);
+			sel.context.addSource(jsrc.src);
+			var sourceNames:Array<String> = [src.getName(g.context), jsrc.src.name];
+
+			switch join.joinType {
+				case Cross:
+					final joinIter:() -> Iterator<Dynamic> = () -> jsrc.src.open(g);
+					var srcIter:() -> Iterator<Dynamic> = itr;
+
+					#if (js || neko || py)
+					itr = () -> Traverser.nestedLoopCrossJoinItr(g, sourceNames, srcIter, joinIter);
+					#else
+					itr = () -> Traverser.nestedLoopCrossJoin(g, sourceNames, srcIter, joinIter);
+					#end
+
+				case Inner:
+					final joinIter = () -> jsrc.src.open(g);
+					var srcIter:() -> Iterator<Dynamic> = itr;
+					
+					var filter:JITFn<Bool> = function(g:Contextual) {
+						return join.on != null ? (interp != null ? interp.pred(join.on) : join.on.eval(g)) : true;
+					};
+
+					#if (js || neko || py)
+					itr = () -> Traverser.nestedLoopInnerJoinItr(g, sourceNames, srcIter, joinIter, filter);
+					#else
+					itr = () -> Traverser.nestedLoopInnerJoin(g, sourceNames, srcIter, joinIter, filter);
+					#end
+				// return it;
+
+				default:
+					// Console.error('TODO');
+					Console.error('TODO: Implement ${join.joinType}');
+			}
+		} */
+
+		// return itr();
+		if (candidateCount == -1)
+			throw new pm.Error('Unhandled');
+		
+		if (filter == null) {
+			var i = 0;
+			while (i < candidates.length) {
+				output.push(candidates[i++]);
+				// i++;
+			}
+		}
+		else {
+			var i = 0;
+			while (i < candidates.length) {
+				var step:Dynamic = candidates[i];
+				focusRows(g, step, sourceNames);
+				if (filter(g)) {
+					output.push(step);
+				}
+				i++;
+			}
+		}
+
+		return candidateCount;
+	}
+
+	public static function focusRows(g:Contextual, rowItem:Dynamic, sourceNames:Array<String>) {
+		if ((rowItem is Array<Dynamic>)) {
+			final a = cast(rowItem, Array<Dynamic>);
+
+			for (i in 0...a.length) {
+				var src:String = sourceNames[i];
+
+				if (src != null) {
+					g.context.focus(a[i], src);
+				}
+			}
+		} else {
+			var row:Dynamic = rowItem;
+			var src = sourceNames[0];
+			if (src != null)
+				g.context.focus(row, src);
+			else if (g.context.unaryCurrentRow)
+				g.context.focus(row);
+		}
 	}
 
 	#if js

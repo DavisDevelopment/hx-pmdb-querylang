@@ -9,20 +9,25 @@ interface QueryPlan {}
 
 enum TableScan {
    FullTableScan/*(table)*/;
-   Indexed(index:IIndex<Dynamic, Dynamic>, type:IndexQueryType);
+   Indexed(index:IIndex<Dynamic, Dynamic>, type:IndexQuery);
    // IndexedEq(column:String, constant:Dynamic);
    // IndexedIn(column:String, constant:Dynamic, rtl:Bool);
 }
 
-enum IndexQueryType {
-   Equals(value: IndexQueryOperand);
-	NotEquals(value: IndexQueryOperand);
-	Greater(value: IndexQueryOperand);
-	Lesser(value: IndexQueryOperand);
-	GreaterEq(value: IndexQueryOperand);
-	LesserEq(value: IndexQueryOperand);
-	In(value: IndexQueryOperand);
+typedef IndexQuery = {
+   final type: RelationPredicateOperator;
+   final value: IndexQueryOperand;
 }
+
+// enum IndexQueryType {
+//    Equals(value: IndexQueryOperand);
+// 	NotEquals(value: IndexQueryOperand);
+// 	Greater(value: IndexQueryOperand);
+// 	Lesser(value: IndexQueryOperand);
+// 	GreaterEq(value: IndexQueryOperand);
+// 	LesserEq(value: IndexQueryOperand);
+// 	In(value: IndexQueryOperand);
+// }
 
 enum IndexQueryOperand {
    Const(value: TypedValue);
@@ -46,3 +51,7 @@ class Strategy {
       //TODO
    }
 }
+
+//{region mixins
+class IndexQueryOperands {}
+//}endregion mixins
