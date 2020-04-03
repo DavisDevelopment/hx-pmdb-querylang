@@ -22,7 +22,7 @@ using pm.Functions;
 
 @:yield
 class Traverser {
-	public var iter:Null<(sel:Sel<Dynamic, Dynamic, Dynamic>, source:Dynamic, fn:Dynamic->Void) -> Void> = null;
+	// public var iter:Null<(sel:Sel<Dynamic, Dynamic, Dynamic>, source:Dynamic, fn:Dynamic->Void) -> Void> = null;
 	// public var sel: Sel<Dynamic>;
 	#if js
 	public var generator:haxe.Constraints.Function;
@@ -42,6 +42,8 @@ class Traverser {
 	/**
 	 * constructs and returns an `Iterator<?>` over the candidate and/or operand rows of the query in question
 	 * TODO the primary iterator unit doesn't need to be ()->Iterator<Dynamic>, and this harms performance. Correct this
+	 * FIXME needs serious performance tuning
+	 * 
 	 * @param sel the `SelectStmt` instance this Traverser belongs to
 	 * @param g
 	 * @param filter (when one exists) the function to be invoked to obtain the boolean value determining whether the currently focused row is operated upon
@@ -49,8 +51,10 @@ class Traverser {
 	 * @param interp (when being called by `Interpreter`) the Interpreter instance executing the statement
 	 * @return an `Iterator<?>` object over the candidate rows
 	 */
-	public dynamic function iterator(sel:Sel<Dynamic, Dynamic, Dynamic>, g:Contextual, filter:Null<JITFn<Bool>>, extract:JITFn<Dynamic>,
-			?interp:Interpreter):Iterator<Dynamic> {
+	public dynamic function iterator(sel:Sel<Dynamic, Dynamic, Dynamic>, g:Contextual, ?filter:Null<JITFn<Bool>>, ?extract:JITFn<Dynamic>, ?interp:Interpreter):Iterator<Dynamic> {
+		filter = null;
+		extract = null;
+
 		var c = g.context;
 		var src = sel.source;
 
@@ -80,6 +84,7 @@ class Traverser {
 				case Inner:
 					final joinIter = () -> jsrc.src.open(g);
 					var srcIter:() -> Iterator<Dynamic> = itr;
+					
 					var filter:JITFn<Bool> = function(g:Contextual) {
 						return join.on != null ? (interp != null ? interp.pred(join.on) : join.on.eval(g)) : true;
 					};
