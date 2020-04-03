@@ -1,4 +1,3 @@
-package ql.sql.runtime;
 
 import ql.sql.runtime.Sel.TableSourceItem;
 import haxe.ds.Either;
@@ -1266,7 +1265,6 @@ class Compiler extends SqlRuntime {
     }
 
     function compileInsertStmt(insert: InsertStatement):InsertStmt {
-        // throw 'ass';
         var rows = [];
         for (x in insert.values) {
             rows.push([for (e in x) compileExpression(e)]);

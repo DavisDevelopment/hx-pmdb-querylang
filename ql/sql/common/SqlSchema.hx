@@ -827,7 +827,7 @@ class SchemaField {
     }
 
     public function getInit():SchemaFieldInit {
-        var ass:SchemaFieldInit = {
+        var finit:SchemaFieldInit = {
             name: name,
             type: type,
             notNull: notNull,
@@ -836,7 +836,7 @@ class SchemaField {
             primaryKey: primaryKey,
             defaultValue: nor((untyped defaultValueExpr), cast defaultValueString)
         };
-        return ass;
+        return finit;
     }
     
     public var access_type(get, never):DType;
