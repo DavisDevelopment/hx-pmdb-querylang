@@ -1,5 +1,9 @@
 package ql.sql.runtime.plan;
 
+import ql.sql.runtime.plan.SelectPlan;
+import ql.sql.runtime.Sel.SelectImpl;
+import pm.ImmutableList;
+import pm.iterators.*;
 import ql.sql.common.index.IIndex;
 import ql.sql.common.index.IndexCache;
 // import pmdb.core.ds.index.IIndex;
@@ -12,6 +16,16 @@ import ql.sql.runtime.Stmt;
 
 import haxe.ds.Option;
 using pm.Options;
+
+import tink.Anon.splat;
+import tink.Anon.merge;
+
+import pm.Helpers.*;
+
+using Lambda;
+using pm.Arrays;
+using pm.Iterators;
+using pm.Functions;
 
 #if Console.hx
 import Console.*;
@@ -27,11 +41,16 @@ class Planner {
       this.compiler = c;
    }
 
+   var selectStmt:Null<SelectStmt> = null;
+
    public function plan(q: Stmt<Dynamic>) {
       //
       switch q.type {
          case SelectStatement(stmt):
-            return planSelect(stmt);
+            selectStmt = stmt;
+            stmt = planSelectStmt(stmt);
+            //
+            return new Stmt(stmt, SelectStatement(stmt));
 
          case UpdateStatement(stmt):
             throw new pm.Error('Unhandled ${q.type}');
@@ -44,11 +63,41 @@ class Planner {
       }
    }
 
+   function compileItrPlan(plan: {?fn:Void->Iterator<Dynamic>, scan:Scan}) {
+      plan.fn = switch plan.scan {
+         case STable(n): switch n {
+            case FullTableScan:
+               () -> new EmptyIterator();
+            case Indexed(index, type):
+               function() {
+                  return new EmptyIterator();
+               }
+         }
+         case SResultSet(n):
+            var sel = this.selectStmt.unwrap();
+            switch n {
+               case ComputeArray:
+                  //TODO
+               case Coroutine:
+                  //TODO
+            }
+            ()->new EmptyIterator();
+      }
+   }
+
+   inline static function overwrite<T>(a:T, f:T->T, updated:(T, T)->Void, ?equality:T->T->Bool) {
+      var tmp = a;
+      a = f(tmp);
+      if (equality==null?a!=tmp:!equality(a, tmp))
+         updated(tmp, a);
+      return a;
+   }
+
    /**
     * computes a SelectPlan which can be used to plot the function which carries out the query
     * @param stmt 
     */
-   function planSelect(stmt: SelectStmt) {
+   function planSelectStmt(stmt: SelectStmt):SelectStmt {//Plan<Dynamic, Dynamic, Dynamic> {
       var isSimpleSelect = false,
           isJoinSelect = false;
       
@@ -58,22 +107,24 @@ class Planner {
 
       var result = {
          scan: Scan.STable(TableScan.FullTableScan),
-         fn: function(row: Dynamic):Void {return ;}
+         fn: function():Iterator<Dynamic> {
+            return new EmptyIterator();
+         }
       };
 
 		if (cache == null) {
-         return result;
+         return stmt;
       }
       else for (idx in cache.m) {
          Console.examine(idx.indexType, idx.keyType);
       }
 
-      var predicate = stmt.i._predicate;
+      // compute the predicate expression
+      var predicate:SelPredicate = stmt.i._predicate;
       if (predicate != null) {
          var tmp = predicate;
          predicate = simplifyPredicate(predicate);
          if (tmp != predicate) {
-            // success('recompiling predicate');
             examine(tmp, predicate);
             compiler.compileTPred(predicate);
          }
@@ -82,26 +133,50 @@ class Planner {
       if (predicate != null) switch predicate.type {
          case Rel(relation):
             var cc = getColumnAndConst(relation.left, relation.right);
-            var index:Null<IIndex<Dynamic, Dynamic>> = getIndexHandleFromBinaryPredicate(cache, relation);
-            if (cc != null && index != null) {
-               var queryTypeCtor = switch relation.op {
-                  case Equals: IndexQueryType.Equals;
-                  case NotEquals: IndexQueryType.NotEquals;
-                  case Greater: IndexQueryType.Greater;
-                  case Lesser: IndexQueryType.Lesser;
-                  case GreaterEq: IndexQueryType.GreaterEq;
-                  case LesserEq: IndexQueryType.LesserEq;
-                  case In: IndexQueryType.In;
-               };
-               result.scan = STable(TableScan.Indexed(index.unwrap(), queryTypeCtor(IndexQueryOperand.Const(cc.constValue))));
+            var indexes:List<IIndex<Dynamic, Dynamic>> = getIndexHandleFromBinaryPredicate(cache, relation);
+            if (indexes != null) {
+               var index = null;
+               switch indexes.length {
+                  case 0:
+                     throw new pm.Error('Empty index-list');
+                  case 1:
+                     index = indexes.first();
+                  default:
+                     throw new pm.Error('Unhandled multi-index candidacy');
+                     index = indexes.last();
+               }
+
+               if (cc != null && index != null) {
+                  result.scan = STable(TableScan.Indexed(index.unwrap(), {
+                     type: relation.op,
+                     value: IndexQueryOperand.Const(cc.constValue)
+                  }));
+               }
             }
 
          default:
       }
 
-      debug(result);
+      // debug(result);
+      examine(result.scan);
+      // compileItrPlan(result);
 
-      return result;
+      var plan = switch result.scan {
+         case STable(Indexed(index, query)):
+            new IndexedPlan(stmt, index, query);
+         // case SResultSet(n):
+         default:
+            new DefaultPlan(stmt);
+      };
+
+      var i = new SelectImpl(null, predicate, stmt.i._exporter);
+      var newStmt = new SelectStmt(stmt.context, stmt.source, i);
+      newStmt.plan = plan;
+      newStmt.plan.planner = this;
+      examine(newStmt.plan);
+
+      // return result;
+      return newStmt;
    }
 
    /**
@@ -153,8 +228,16 @@ class Planner {
             case [TBinop(_,_,_), TConst(rightValue)]:
                var leftOp = getBinaryOperation(bin.left);
                switch leftOp {
+                  // column + leftValue = rightValue
                   case {op:OpAdd, left:{expr:TColumn(_.label()=>column, _)}, right:{expr:TConst(leftValue)}}:
                      var newRhv:TypedValue = BinaryOperators.top_subt(rightValue, leftValue);
+                     examine(newRhv);
+                     return {op:bin.op, left:leftOp.left, right:te(TConst(newRhv))};
+
+                  // column - leftValue = rightValue
+                  case {op:OpSubt, left:{expr:TColumn(_.label()=>column, _)}, right:{expr:TConst(leftValue)}}:
+                     // 
+                     var newRhv:TypedValue = BinaryOperators.top_add(rightValue, leftValue);
                      examine(newRhv);
                      return {op:bin.op, left:leftOp.left, right:te(TConst(newRhv))};
 
@@ -169,7 +252,7 @@ class Planner {
                success('Already in simplest form: ', printBinaryOperation(bin));
 
             default:
-               error('Did not simplify: ', printBinaryOperation(bin));
+               error('Did not simplify: ' + printBinaryOperation(bin));
          }
       }
       else {
@@ -192,24 +275,67 @@ class Planner {
       return bin;
    }
 
-   function getIndexHandleFromBinaryPredicate(cache:IndexCache<Dynamic>, predicate:RelationalPredicate):IIndex<Dynamic, Dynamic> {
-      var test:IIndex<Dynamic, Dynamic> -> Bool = (idx -> false);
-      switch predicate.left.expr {
-         case TColumn(_.label()=>columnName, _):
-            return cast cache.index(columnName);
+   private var simplifier: Null<Simplifier> = null;
+   function simplifyExpressionViaRuleset(e: TExpr):TExpr {
+      if (simplifier == null)
+         simplifier = new Simplifier(this);
+
+      return simplifier.simplify(e);
+   }
+
+   /**
+    * attempts to look up a list of the `IIndex<K, Row>` objects suitable for use in executing the filter-operation represented by `predicate`
+    * @param cache the `IndexCache<?>` in use by the medium from which the queries is reading
+    * @param predicate the filter-op being applied to the RowSet represented in `cache`
+    * @return List<IIndex<Dynamic, Dynamic>> of candidate indices
+    */
+   private function getIndexHandleFromBinaryPredicate(cache:IndexCache<Dynamic>, predicate:RelationalPredicate):List<IIndex<Dynamic, Dynamic>> {
+      var results = new List();
+      // var rules:Array<{
+      //    id: Int,
+      //    match: (idx:IIndex<Dynamic, Dynamic>)->Bool
+      // }> = new Array();
+
+      // var ruleIdCnt:Int = 0;
+		// function rule(?id:Int, r:(index:IIndex<Dynamic, Dynamic>)->Bool){
+      //    final o = {id:-1, match:r};
+      //    if (id != null) o.id = id;
+      //    else o.id = ruleIdCnt++;
+
+      //    rules.push(o);
+      // }
+
+      // var test:IIndex<Dynamic, Dynamic> -> Bool = (idx -> false);
+
+      switch [predicate.left.expr, predicate.right.expr] {
+         case [TColumn(_.label()=>columnName, _), _]:
+            results.add(cache.index(columnName));
+            // rule((idx:IIndex<Dynamic,Dynamic>) -> idx.)
+
+         // case [TCall({expr:TFunc({id:'int'})}, [{expr:TBinop(op, left, right)}])]:
+            //TODO
 
          default:
             var bin = getBinaryOperationFromRel(predicate);
-            var e = new TExpr(TBinop(bin.op, bin.left, bin.right));
-            throw new pm.Error('Unexpected ${e.print()}');
+            var e   = new TExpr(TBinop(bin.op, bin.left, bin.right));
+            
+            Console.error('Unexpected ${e.print()}');
       }
 
-      for (idx in cache.m) {
-         if (test(cast idx))
-            return cast idx;
-      }
+      // for (idx in cache.m) {
+      //    // if (test(cast idx))
+      //    //    return cast idx;
+      //    for (rule in rules) {
+      //       if (rule.match(idx)) {
+      //          results.add({
+      //             rule: rule,
+      //             index: idx
+      //          });
+      //       }
+      //    }
+      // }
 
-      return null;
+      return results.length == 0 ? null : results;
    }
 
    inline function getBinaryOperation(e: TExpr):BinaryOperation {
@@ -316,3 +442,100 @@ typedef ConstBinaryOperation = {
    public final right: TypedValue;
    // @:optional public var result: TypedValue;
 };
+
+class Simplifier {
+   public final planner: Planner;
+   public var rules: Array<ExprRule>;
+
+   public function new(planner) {
+      this.planner = planner;
+
+      initRules();
+   }
+
+   function initRules() {
+      inline function add(rule: ExprRule) {
+         rules.push(rule);
+      }
+
+      function rule(f: TExpr->Option<TExpr>) {
+         for (rule in rules) {
+            if (Reflect.compareMethods(rule.apply, f))
+               throw new pm.Error();
+         }
+         return new ExprRule(f);
+      }
+
+      function safe_rule(f: TExpr->TExpr) {
+         return rule(function(e: TExpr):Option<TExpr> {
+            try {
+               return Some(f(e));
+            }
+            catch (code: Int) {
+               switch code {
+                  case 0:
+                     return None;
+
+                  default:
+                     throw new pm.Error('Error code = $code');
+               }
+            }
+            catch (err: Dynamic) {
+               error(err);
+               return None;
+            }
+         });
+      }
+
+      function rrule<Data>(test:TExpr->Bool, extract:TExpr->Data, export:Data->TExpr) {
+         return safe_rule(function(e) {
+            if (test(e)) {
+               return export(extract(e));
+            }
+            throw 0;
+         });
+      }
+
+      // rrule(e -> e.expr.match(TBinop(OpEq|OpNEq, _, _)), e -> e.matchFor({expr:TBinop(OpEq|OpNEq, {expr:TBinop(innerOp, lhv, rhv)}, outerRhv)}, {}), )
+      add(rule(function(e: TExpr) {
+         switch e.expr {
+            case TBinop(OpEq, lhv, rhv={expr:TColumn(_, _)}):
+               return Some(new TExpr(TBinop(OpEq, rhv, lhv)));
+
+            default:
+         }
+         return None;
+      }));
+   }
+
+   public function simplify(e: TExpr):TExpr {
+      var candidates = applyRules(e);
+      if (candidates.length > 1) {
+         throw new pm.Error('Multiple candidate expressions');
+      }
+      return candidates[0];
+   }
+
+   function applyRules(e: TExpr):Array<TExpr> {
+      var result:ImmutableList<TExpr> = ImmutableList.Tl;
+      for (rule in rules) {
+         switch rule.apply(e) {
+            case None:
+               continue;
+            case Some(v):
+               result = v & result;
+         }
+      }
+      return result;
+   }
+}
+
+class ExprRule extends AbstractRule<TExpr, TExpr> {}
+
+@:generic
+class AbstractRule<In, Out> {
+   public var apply: In->Option<Out>;
+   public function new(f) {
+      this.apply = f;
+   }
+}

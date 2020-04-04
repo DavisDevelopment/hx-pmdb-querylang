@@ -14,6 +14,7 @@ using haxe.macro.ComplexTypeTools;
 
 @:using(ql.sql.runtime.SType.STypes)
 enum SType {
+	//? TAny;
 	TUnknown;
 
 	TBool;

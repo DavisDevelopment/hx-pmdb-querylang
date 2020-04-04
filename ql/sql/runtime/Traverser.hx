@@ -311,6 +311,7 @@ class Traverser {
 					jsrc.src.dump(g, r);
 
 					//FIXME filter is declared every time, whether it's necessary or not.
+					final filterJoin = join.on != null;
 					var filter:JITFn<Bool> = function(g:Contextual) {
 						return join.on != null ? (interp != null ? interp.pred(join.on) : join.on.eval(g)) : true;
 					};
@@ -320,8 +321,14 @@ class Traverser {
 						for (rightRow in r) {
 							var row = [leftRow, rightRow];
 							//FIXME if filter isn't used, focusRows need not be invoked here, but filter is used every time
-							focusRows(g, row, sourceNames);
-							if (filter(g)) {
+							if (filterJoin) {
+								focusRows(g, row, sourceNames);
+								if (filter(g)) {
+									candidates.push(row);
+									candidateCount++;
+								}
+							}
+							else {
 								candidates.push(row);
 								candidateCount++;
 							}
@@ -331,10 +338,12 @@ class Traverser {
 				default:
 					throw new pm.Error('TODO: Implement ${join.joinType}');
 			}
+
 			proceed = false;
 		}
 
 		if (proceed) {
+			//Standard SELECT
 			if (STREAMED) {
 				for (item in src.getSpec(c).open(g)) {
 					candidates[candidateCount++] = item;

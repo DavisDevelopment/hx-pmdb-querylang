@@ -20,7 +20,9 @@ import haxe.ds.Option;
 using pm.Options;
 import ql.sql.common.SqlSchema;
 
-import tink.Anon.*;
+import tink.Anon.merge;
+import tink.Anon.splat;
+import pm.Helpers.*;
 
 using Lambda;
 using pm.Arrays;
@@ -32,6 +34,8 @@ import Console.*;
 #else
 import pm.utils.LazyConsole.*;
 #end
+
+private typedef OutFn<T> = (chunk:T, offset:Int)->Bool;
 
 @:access(ql.sql.runtime)
 class SelectPlan<Tbl, InRow, OutRow> {
@@ -46,13 +50,20 @@ class SelectPlan<Tbl, InRow, OutRow> {
 	 * get an iterator of all rows which are to be considered for yielding
 	 * @return Iterator<InRow>
 	 */
-	public function candidates():Itr<InRow> {
+	public function candidates(out: OutFn<InRow>):Bool {
 		throw new pm.Error.NotImplementedError();
    }
 
    @:keep
    public function toString():String {
       return '<plan tracing TBI>';
+   }
+
+   @:keep 
+   public function cancel() {
+      if (stmt.plan == this) {
+         stmt.plan = null;
+      }
    }
 }
 
@@ -65,10 +76,19 @@ class DefaultPlan<Tbl, In, Out> extends SelectPlan<Tbl, In, Out> {
    public function new(stmt) {
       super(stmt);
    }
-   override function candidates():Itr<In> {
-      // var arr:Array<In> = cast stmt.i.applyNaive(stmt);
-      // return arr.iterator();
-      return stmt.i.naiveCandidatePlan(stmt, null);
+
+   override function candidates(out:OutFn<In>):Bool {
+      // return super.candidates(out);
+      stmt.i._traverser.computeCandidatesIOC(
+         stmt, 
+         stmt.context, 
+         function(step:Dynamic, offset:Int) {
+            if (!out(step, offset)) {
+               throw new pm.Error('${step}, N=$offset', 'STOP');
+            }
+         }
+      );
+      return true;
    }
 }
 
@@ -87,11 +107,20 @@ class IndexedPlan<Tbl, In, Out> extends SelectPlan<Tbl, In, Out> {
     * applies the provided `IndexQuery` to the actual Index data structure
     * @return `Itr<In>` resettable iterator over results
     */
-   override function candidates():Itr<In> {
+   override function candidates(out:OutFn<In>):Bool {
       final idx:IIndex<Dynamic, In> = index;
+      var rows:Array<In> = new Array();
       switch query.type {
          case Equals:
-            throw new pm.Error.NotImplementedError();
+            // throw new pm.Error.NotImplementedError();
+            rows = idx.getByKey(switch query.value {
+               case Const(value): value;
+               case Expr(e): e.eval(stmt.context);
+            });
+            if (nn(rows)) 
+               for (i in 0...rows.length) 
+                  out(rows[i], i);
+            return true;
          case NotEquals:
             throw new pm.Error.NotImplementedError();
          case Greater:

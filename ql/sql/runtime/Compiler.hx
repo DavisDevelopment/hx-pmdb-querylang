@@ -724,7 +724,7 @@ class Compiler extends SqlRuntime {
         e.extra.set('compilationLevel', 1);
 
         typeExpr(e);
-        Console.examine(e.type);
+        // // Console.examine(e.type);
     }
 
     /**

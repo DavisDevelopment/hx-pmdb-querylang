@@ -168,9 +168,183 @@ class SelectImpl {
 		}
     }
 
-    public function apply(sel:Sel<Dynamic, Dynamic, Dynamic>, ?interp:Interpreter) {
-        return applyNaive(sel, interp);
+    public function apply(sel:Sel<Dynamic, Dynamic, Dynamic>, ?interp:Interpreter):Array<Dynamic> {
+        if (sel.plan != null) {
+            var accumulator:Array<Dynamic> = new Array();
+            function reduc(a:Array<Dynamic/*OutRow*/>, row:Dynamic/*InRow*/):Array<Dynamic> {
+                a.push(row);
+                return a;
+            }
+            final success = sel.plan.candidates(function(current:Dynamic, offset:Int) {
+                accumulator = reduc(accumulator, current);
+                return true;
+            });
+
+            if (!success)
+                throw new pm.Error('you\'re a failure, dude.');
+
+            return accumulator;
+        }
+        else {
+            return applyNaive(sel, interp);
+        }
     }
+
+#if isnt_awful_code
+    private var __planItr:Itr<Dynamic> = null;
+    private function naiveCandidatePlan(sel:Sel<Dynamic, Dynamic, Dynamic>, ?interp:Interpreter):Itr<Dynamic> {
+        //cache iterator instance
+        if (__planItr != null) {
+            __planItr.reset();
+            return __planItr;
+        }
+
+		var g:SelectStmtContext<Dynamic, Dynamic, Dynamic> = sel.context;
+		if (g.sources.length == 0)
+            g.addSource(sel.source.getSpec(g.context));
+        final c = g.context;
+        var outputSources = sel.getSourcesUsedInOutput();
+        
+        /**
+         * called before iteration starts
+         */
+        function begin() {
+            Console.debug('candidate-iteration begun');
+            c.beginScope();
+            c.pushSourceScope(cast g.sources.sources);
+            if (g.sources.length == 1)
+                c.use(g.sources.sources[0]);
+        }
+
+        /**
+         * called immediately after iteration completes, 
+         * before the first call to `hasNext` for which the result is `false` returns
+         */
+        function finish() {
+            c.popSourceScope();
+            c.endScope();
+        }
+
+        /**
+         * applied to each step, before `next` returns
+         * @param step the value from `next`
+         */
+        
+        var middle = function(step: Dynamic) {};
+        function middle0(step: Dynamic) {
+            if (!nn(step)) {
+                throw new pm.Error('null');
+            }
+
+            // var rows:Array<Dynamic> = [row];
+            if ((step is Array<Dynamic>)) {
+                final len:Int = cast(step, Array<Dynamic>).length;
+                switch len {
+                    case 0, 1: throw new pm.Error('y');
+                    /**
+                     * some loop-unrolling for speed :D
+                     */
+                    case 2: 
+                        middle = cast function(rows:Array<Dynamic>) {for (i in 0...2) if (nn(outputSources.sources[i])) g.context.focus(rows[i], outputSources.sources[i].name);};
+                    case 3: 
+                        middle = cast function(rows:Array<Dynamic>) {for (i in 0...3) if (nn(outputSources.sources[i])) g.context.focus(rows[i], outputSources.sources[i].name);};
+                    case 4: 
+                        middle = cast function(rows:Array<Dynamic>) {for (i in 0...4) if (nn(outputSources.sources[i])) g.context.focus(rows[i], outputSources.sources[i].name);};
+                    case 5: 
+                        middle = cast function(rows:Array<Dynamic>) {for (i in 0...5) if (nn(outputSources.sources[i])) g.context.focus(rows[i], outputSources.sources[i].name);};
+                    default:
+                        middle = cast function(rows: Array<Dynamic>) {
+                            // var rows:Array<Dynamic> = cast step;
+                            for (i in 0...rows.length) {
+                                var src:TableSpec = outputSources.sources[i];
+                                
+                                if (src != null) {
+                                    g.context.focus(rows[i], src.name);
+                                }
+                            }
+                        };
+                }
+            }
+
+            else {
+                middle = function(row: Dynamic) {
+                    // var row = step;
+                    if (outputSources.sources[0] != null)
+                        g.context.focus(row, outputSources.sources[0].name);
+                    else {
+                        #if debug
+                        throw new pm.Error('outputSources empty');
+                        #end
+                        middle = #if js cast Functions.noop #else function(x:Dynamic) {} #end;
+                    }
+                };
+            }
+
+            middle(step);
+        }
+        middle = middle0; 
+       
+        /*
+        function middle(step: Dynamic) {
+            if (Std.is(step, Array)) {
+                var rows:Array<Dynamic> = cast step;
+                for (i in 0...rows.length) {
+                    var src:TableSpec = outputSources.sources[i];
+                    
+                    if (src != null) {
+                        g.context.focus(rows[i], src.name);
+                    }
+                }
+            }
+            else {
+                var row = step;
+                if (outputSources.sources[0] != null)
+                    g.context.focus(row, outputSources.sources[0].name);
+            }
+        }
+        */
+        
+        var itr:Iterator<Dynamic> = null;
+        var dyn:Dynamic = {};
+        var _Started = false,
+            _Finished = false;
+        
+        dyn.hasNext = function() {
+            var r = itr.hasNext();
+            if (!_Finished && !r) {
+                _Finished = true;
+                finish();
+            }
+            return r;
+        };
+
+        dyn.next = function() {
+            if (!_Started) {
+                begin();
+                _Started = true;
+            }
+
+            var row:Dynamic = itr.next();
+            log(row);
+            middle(row);
+            return row;
+        };
+
+        dyn.reset = function _init() {
+            if (_Started && !_Finished) {
+                throw new pm.Error('Unterminated iteration. Are you trying to use multiple iterators at once?');
+            }
+
+            _Started = false;
+            _Finished = false;
+            itr = _traverser.iterator(sel, g, null, null, interp);//.map(x -> {middle(x); x;});
+        };
+        _init();
+
+        var out:Itr<Dynamic> = cast dyn;
+        return this.__planItr = out;
+    }
+#end
 
     /**
      * get 'r dun
