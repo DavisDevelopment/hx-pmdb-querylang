@@ -165,11 +165,7 @@ class Traverser {
 						return join.on != null ? (interp != null ? interp.pred(join.on) : join.on.eval(g)) : true;
 					};
 
-					/* #if (js || neko || py)
-					itr = () -> Traverser.nestedLoopInnerJoinItr(g, sourceNames, srcIter, joinIter, filter);
-					#else
-					itr = () -> Traverser.nestedLoopInnerJoin(g, sourceNames, srcIter, joinIter, filter);
-					#end */
+					candidateCount = 0;
 					for (leftRow in l) {
 						for (rightRow in r) {
 							var row = [leftRow, rightRow];
@@ -195,6 +191,7 @@ class Traverser {
 
 		if (proceed) {
 			if (STREAMED) {
+				candidateCount = 0;
 				for (item in src.getSpec(c).open(g)) {
 					candidates[candidateCount++] = item;
 				}
@@ -246,8 +243,10 @@ class Traverser {
 		} */
 
 		// return itr();
-		if (candidateCount == -1)
+		if (candidateCount == -1) {
+			Console.examine(candidateCount, candidates);
 			throw new pm.Error('Unhandled');
+		}
 
 		if (filter == null) {
 			var i = 0;
@@ -345,6 +344,7 @@ class Traverser {
 		if (proceed) {
 			//Standard SELECT
 			if (STREAMED) {
+				candidateCount = 0;
 				for (item in src.getSpec(c).open(g)) {
 					candidates[candidateCount++] = item;
 					// output(item, candidateCount++);
@@ -360,8 +360,10 @@ class Traverser {
 			}
 		}
 
-		if (candidateCount == -1)
+		if (candidateCount == -1) {
+			Console.examine(candidateCount, candidates);
 			throw new pm.Error('Unhandled');
+		}
 
 		if (filter == null) {
 			var i = 0;
