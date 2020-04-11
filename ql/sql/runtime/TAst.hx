@@ -708,10 +708,13 @@ class TExprTypeTools {
 
         return switch value.type {
             case TUnknown: sv(value.value);
+            case TNull(null): 'null';
+            case TNull(type): sv(value.export());
             case TBool: sv(value.boolValue);
             case TInt: sv(value.intValue);
             case TFloat: sv(value.floatValue);
             case TString: sv(value.stringValue);
+            case TBytes: sv(cast(value.value, haxe.io.Bytes).toString());
             case TDate: 'new DateTime(${sv(value.dateValue.getTime())})';
             case TArray(_): '['+value.arrayAnyValue.map(tvprint).join(",")+']';
             case TMap(key, value): throw new pm.Error('TODO');

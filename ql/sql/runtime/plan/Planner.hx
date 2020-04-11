@@ -450,7 +450,7 @@ class Simplifier {
    public function new(planner) {
       this.planner = planner;
 
-      initRules();
+      // initRules();
    }
 
    function initRules() {
@@ -509,11 +509,69 @@ class Simplifier {
    }
 
    public function simplify(e: TExpr):TExpr {
-      var candidates = applyRules(e);
+      /* var candidates = applyRules(e);
       if (candidates.length > 1) {
          throw new pm.Error('Multiple candidate expressions');
       }
-      return candidates[0];
+      return candidates[0]; */
+      switch e.expr {
+         case TConst(_):
+         case TReference(_):
+         case TParam(_):
+         case TTable(_):
+         case TColumn(_, _):
+         case TField(o, field):
+            var o2 = simplify(o);
+            if (o2 != o)
+               return te(TField(o2, field));
+         case TArray(arr, index):
+            var arr2 = simplify(arr), idx2 = simplify(index);
+            if (arr != arr2 || index != idx2)
+               return te(TArray(arr2, idx2));
+         case TFunc(_):
+         case TCall(f, params):
+            var f2 = simplify(f);
+            var params2 = [for (p in params) simplify(p)];
+            var replace = f != f2;
+            if (!replace) for (i in 0...params2.length) {
+               if (params[i] != params2[i]) {
+                  replace = true;
+                  break;
+               }
+            }
+            if (replace)
+               return te(TCall(f2, params2));
+
+         case TBinop(op, left, right):
+            switch op {
+               case OpEq:
+               case OpGt:
+               case OpGte:
+               case OpLt:
+               case OpLte:
+               case OpNEq:
+               case OpIn:
+               case OpMult:
+               case OpDiv:
+               case OpMod:
+               case OpAdd:
+               case OpSubt:
+               case OpBoolAnd:
+               case OpBoolOr:
+               case OpBoolXor:
+            }
+
+         case TUnop(op, post, e):
+            //TODO
+         case TArrayDecl(values):
+            //TODO
+         case TObjectDecl(fields):
+            //TODO
+         case TCase(type):
+            //TODO
+      }
+
+      return e;
    }
 
    function applyRules(e: TExpr):Array<TExpr> {
@@ -527,6 +585,10 @@ class Simplifier {
          }
       }
       return result;
+   }
+
+   function te(e: TExprType):TExpr {
+      return new TExpr(e);
    }
 }
 

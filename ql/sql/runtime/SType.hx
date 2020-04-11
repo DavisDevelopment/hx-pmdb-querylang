@@ -16,11 +16,13 @@ using haxe.macro.ComplexTypeTools;
 enum SType {
 	//? TAny;
 	TUnknown;
+	TNull(?t: SType);
 
 	TBool;
 	TInt;
 	TFloat;
 	TString;
+	TBytes;
 	TDate;
 	TArray(type:SType);
 	TMap(key:SType, value:SType);
@@ -151,10 +153,14 @@ class STypes {
 	public static function toDataType(type:SType):DataType {
 		return switch type {
 			case TUnknown: DataType.TUnknown;
+			case TNull(null):
+				throw new pm.Error('No DataType equivalent for TNull');
+			case TNull(t): DataType.TNull(toDataType(t));
 			case TBool: DataType.TScalar(ScalarDataType.TBoolean);
 			case TInt: DataType.TScalar(ScalarDataType.TInteger);
 			case TFloat: DataType.TScalar(ScalarDataType.TDouble);
 			case TString: DataType.TScalar(ScalarDataType.TString);
+			case TBytes: DataType.TScalar(ScalarDataType.TBytes);
 			case TDate: DataType.TScalar(ScalarDataType.TDate);
 			case TArray(t): DataType.TArray(toDataType(t));
 			case TMap(key, value):
@@ -167,15 +173,17 @@ class STypes {
 	public static function validateValue(type:SType, value:Dynamic):Bool {
 		return switch type {
 			case TUnknown: true;
+			case TNull(null): pm.Helpers.strictEq(value, null);
+			case TNull(t): pm.Helpers.strictEq(value, null) || validateValue(t, value);
 			case TBool: (value is Bool);
 			case TInt: (value is Int);
 			case TFloat: (value is Float);
 			case TString: (value is String);
+			case TBytes: (value is haxe.io.Bytes);
 			case TDate: DateTime.is(value);
-			case TArray(_): (value is Array<Dynamic>);
+			case TArray(t): (value is Array<Dynamic>) && cast(value, Array<Dynamic>).all(x -> validateValue(t, x));
 			case TMap(key, value): (value is haxe.IMap<Dynamic, Dynamic>);
-			case TStruct(schema):
-				throw new pm.Error('TODO');
+			case TStruct(schema): schema.validate(value);
 		}
 	}
 
@@ -203,12 +211,15 @@ class STypes {
 	public static function validateRepr(type:SType, value:Dynamic):Bool {
 		return switch type {
 			case TUnknown: true;
+			case TNull(null): pm.Helpers.strictEq(value, null);
+			case TNull(t): pm.Helpers.strictEq(value, null) || validateValue(t, value);
 			case TBool: (value is Bool);
 			case TInt: (value is Int);
 			case TFloat: (value is Float);
 			case TString: (value is String);
+			case TBytes: (value is haxe.io.Bytes);
 			case TDate: DateTime.is(value);
-			case TArray(_): (value is Array<Dynamic>);
+			case TArray(t): (value is Array<Dynamic>) && cast(value, Array<Dynamic>).all(x -> validateRepr(t, x));
 			case TMap(key, value): (value is haxe.IMap<Dynamic, Dynamic>);
 			case TStruct(schema): schema.validate(value);
 		}
@@ -217,10 +228,13 @@ class STypes {
 		return switch type {
 			case TUnknown://?should this just throw an error?
 				(_ -> true);
+			case TNull(null): (value:Dynamic) -> pm.Helpers.strictEq(value, null);
+			case TNull(t): (value:Dynamic) -> pm.Helpers.strictEq(value, null) || validateValue(t, value);
 			case TBool: (value:Dynamic) -> (value is Bool);
 			case TInt: (value:Dynamic) -> (value is Int);
 			case TFloat: (value:Dynamic) -> (value is Float);
 			case TString: (value:Dynamic) -> (value is String);
+			case TBytes: (value:Dynamic) -> (value is haxe.io.Bytes);
 			case TDate: (value:Dynamic) -> DateTime.is(value);
 			case TArray(_): (value:Dynamic) -> (value is Array<Dynamic>);
 			case TMap(key, value): (value:Dynamic) -> (value is haxe.IMap<Dynamic, Dynamic>);
@@ -233,6 +247,16 @@ class STypes {
 		return switch type {
 			case TUnknown: value;
 			case TBool: value == true;
+			case TNull(null):
+				if (value == null)
+					null;
+				else
+					throw new pm.Error('Unexpected $value');
+			case TNull(type):
+				if (value == null)
+					null;
+				else
+					importValue(type, value, pos);
 			case TInt:
 				if ((value is Int)) value;
 				else if ((value is Float)) Std.int(value);
@@ -243,6 +267,10 @@ class STypes {
 			case TString:
 				if ((value is String)) value;
 				else if ((value is haxe.io.Bytes)) cast(value, haxe.io.Bytes).toString();
+				else throw new pm.Error('Expected String|Bytes, got ${tn()}', pos);
+			case TBytes:
+				if ((value is haxe.io.Bytes)) cast(value, haxe.io.Bytes);
+				else if ((value is String)) haxe.io.Bytes.ofString(cast(value, String));
 				else throw new pm.Error('Expected String|Bytes, got ${tn()}', pos);
 			case TDate:
 				if (DateTime.is(value)) value;
@@ -268,6 +296,21 @@ class STypes {
 			return Std.string(Type.typeof(value));
 		return switch type {
 			case TUnknown: Functions.identity;
+			case TNull(null):
+				function(value: Dynamic):Dynamic return {
+					if (value == null)
+						null;
+					else
+						throw new pm.Error('Unexpected $value');
+				};
+			case TNull(type):
+				var imp = opt_importValue(type, pos);
+				function(value: Dynamic):Dynamic {
+					if (value == null)
+						return null;
+					else
+						return imp(value);
+				}
 			case TBool: (value:Dynamic) -> value == true;
 			case TInt:
 				function(value: Dynamic):Dynamic {
@@ -276,6 +319,15 @@ class STypes {
 			case TFloat:
 				function(value:Dynamic):Dynamic return {
 					if ((value is Float)) value; else throw new pm.Error('Expected Float, got ${tn(value)}', pos);
+				};
+			case TBytes:
+				function(value: Dynamic):Dynamic return {
+					if ((value is haxe.io.Bytes))
+						cast(value, haxe.io.Bytes);
+					else if ((value is String))
+						haxe.io.Bytes.ofString(cast(value, String));
+					else
+						throw new pm.Error('Expected String|Bytes, got ${tn(value)}', pos);
 				};
 			case TString:
 				function(value:Dynamic):Dynamic return {
@@ -330,6 +382,9 @@ class STypes {
 	public static function print(type:SType):String {
 		return switch type {
 			case TUnknown: 'Unknown';
+			case TBytes: 'Bytes';
+			case TNull(null): 'Null';
+			case TNull(type): 'Null<${print(type)}>';
 			case TBool: 'Bool';
 			case TInt: 'Int';
 			case TFloat: 'Float';
@@ -344,10 +399,15 @@ class STypes {
 	public static function toDType(type:SType):DType {
 		return switch type {
 			case TUnknown: DType.TUnknown;
+			case TNull(null):
+				throw new pm.Error('No Conversion');
+			case TNull(t): DType.TNull(toDType(t));
 			case TBool: DType.TBool;
 			case TInt: DType.TInt;
 			case TFloat: DType.TFloat;
 			case TString: DType.TString;
+			case TBytes: 
+				throw new pm.Error('No Conversion');
 			case TDate: DType.TDate;
 			case TArray(type): DType.TArray(toDType(type));
 			case TMap(key, value): DType.TMap(toDType(key), toDType(value));

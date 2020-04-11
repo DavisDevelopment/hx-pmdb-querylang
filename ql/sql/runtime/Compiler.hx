@@ -954,25 +954,15 @@ class Compiler extends SqlRuntime {
                 
         }
         return super.expressionNodeConvert(e);
-
-        // var ret:TExpr = super.expressionNodeConvert(e);
-        // switch ret.expr {
-        //     case TField({expr:TReference(tbl=_.label()=>tableName)}, column) if (tblNames.has(tableName)):
-        //         return new TExpr(TColumn(column, tbl));
-            
-        //     case TReference(idSym=_.label()=>ident):
-        //         for (i in 0...context.querySources.length) {
-        //             var src = context.querySources[i];
-        //             if (src.schema.column(ident) != null) {
-        //                 return new TExpr(TColumn(idSym, symbol(src.name)));
-        //             }
-        //         }
-                
-        //     default:
-        // }
-        // return ret;
     }
 
+    /**
+     * computes the `SType` of a Binary Expression
+     * @param op 
+     * @param left 
+     * @param right 
+     * @return SType
+     */
     function typeBinopExpr(op:BinaryOperator, left:TExpr, right:TExpr):SType {
         typeExpr(left);
         typeExpr(right);
