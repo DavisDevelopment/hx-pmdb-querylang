@@ -1027,6 +1027,40 @@ class Compiler extends SqlRuntime {
         }
     }
 
+    function typeCallExpr(func:TExpr, args:Array<TExpr>):SType {
+        var funcName:Null<String> = null;
+        switch func.expr {
+            case TFunc({id:id}):
+                funcName = id;
+            case TReference({identifier:id}):
+                funcName = id;
+            default:
+        };
+
+        if (funcName != null) {
+            switch [funcName.toLowerCase(), args] {
+                case ['now', []]: 
+                    return SType.TDate;
+                case ['hash', [{type:TString|TBytes}]]: 
+                    return SType.TInt;
+                case ['len'|'int', _]:
+                    return SType.TInt;
+                case ['cat', _]:
+                    if (args.length == 0)
+                        return TNull(null);
+                    else {
+                        return args[0].type;
+                    }
+                case ['strlower'|'strupper', [{type:TString|TBytes}]]: 
+                    return TString;
+                
+                default:
+                    return TUnknown;
+            }
+        }
+        return TUnknown;
+    }
+
     function typeExpr(e: TExpr) {
         var compLvl:Int = e.extra.compilationLevel;
         switch compLvl {
@@ -1080,6 +1114,7 @@ class Compiler extends SqlRuntime {
                 typeExpr(f);
                 for (p in params)
                     typeExpr(p);
+                e.type = exprt(e);
                 
             case TConst(_):
                 e.type = exprt(e);
@@ -1105,6 +1140,7 @@ class Compiler extends SqlRuntime {
                     typeSelPredicate(b.e);
                     typeExpr(b.result);
                 }
+
                 var t:SType = null;
                 for (b in branches) {
                     if (t == null)
@@ -1147,6 +1183,9 @@ class Compiler extends SqlRuntime {
 	 */
 	function exprt(e:TExpr):SType {
 		switch e.expr {
+            case TConst(_.value => null):
+                return TNull(null);
+            
 			case TConst(value):
 				value.validate();
                 return value.type;
@@ -1155,6 +1194,7 @@ class Compiler extends SqlRuntime {
 				// var schema = context.getTableSchema(table.identifier);
                 // return schema.column(name.identifier).type;
                 return context.getColumnField(name.identifier, table != null ? table.identifier : null).type;
+            
             case TReference(name):
                 throw new pm.Error.NotImplementedError();
             case TParam(name):
@@ -1168,7 +1208,9 @@ class Compiler extends SqlRuntime {
 			case TFunc(f):
 				throw new pm.Error.NotImplementedError();
 			case TCall(f, params):
-				throw new pm.Error.NotImplementedError();
+                // throw new pm.Error.NotImplementedError();
+                return typeCallExpr(f, params);
+
 			case TBinop(op, left, right):
 				throw new pm.Error.NotImplementedError();
 			case TUnop(op, _, e):
@@ -1177,6 +1219,7 @@ class Compiler extends SqlRuntime {
 				throw new pm.Error.NotImplementedError();
 			case TObjectDecl(_):
                 throw new pm.Error.NotImplementedError();
+            
             case TCase(t):
 				throw new pm.Error.NotImplementedError();
 		}
@@ -1199,7 +1242,7 @@ class Compiler extends SqlRuntime {
                             l.type = r.type = def;
 
                         case [ltype, rtype]:
-                            if (!ltype.eq(rtype)) {
+                            if (!ltype.compatible(rtype)) {
                                 throw new pm.Error('Invalid operation $ltype $opStr $rtype');
                             }
                     }
@@ -1230,7 +1273,7 @@ class Compiler extends SqlRuntime {
                             case TArray(itemType):
                                 switch l.type {
                                     case _.eq(itemType)=>true:
-                                    case TArray(_.eq(itemType)=>true):
+                                    case TArray(_.compatible(itemType)=>true):
                                     case TUnknown:
                                         l.type = itemType;
                                     case other:

@@ -414,4 +414,15 @@ class STypes {
 			case TStruct(schema): DType.TStruct(schema);
 		}
 	}
+
+	public static function compatible(left:SType, right:SType):Bool {
+		return switch [left, right] {
+			case [_, TUnknown|TNull(null)]|[TUnknown|TNull(null), _]: true;
+			case [TString, TBytes]|[TBytes, TString]: true;
+			case [t1, TNull(t2)]|[t2, TNull(t1)]: t1.compatible(t2);
+
+			default:
+				left.eq(right);
+		}
+	}
 }
