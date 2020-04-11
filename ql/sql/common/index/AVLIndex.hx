@@ -188,6 +188,14 @@ class AVLIndex<Key, Item> extends AbstractIndex<Key, Item> {
         return ret;
     }
 
+    override function keys():Iterator<Key> {
+        // return super.allKeys();
+        return tree.keys();
+    }
+    override function allKeys():Array<Key> {
+        return keys().array();
+    }
+
     override function size():Int {
         return tree.size();
     }

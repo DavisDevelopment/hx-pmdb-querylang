@@ -110,9 +110,9 @@ class IndexedPlan<Tbl, In, Out> extends SelectPlan<Tbl, In, Out> {
    override function candidates(out:OutFn<In>):Bool {
       final idx:IIndex<Dynamic, In> = index;
       var rows:Array<In> = new Array();
+
       switch query.type {
          case Equals:
-            // throw new pm.Error.NotImplementedError();
             rows = idx.getByKey(switch query.value {
                case Const(value): value;
                case Expr(e): e.eval(stmt.context);
@@ -121,8 +121,30 @@ class IndexedPlan<Tbl, In, Out> extends SelectPlan<Tbl, In, Out> {
                for (i in 0...rows.length) 
                   out(rows[i], i);
             return true;
+         
          case NotEquals:
-            throw new pm.Error.NotImplementedError();
+            // throw new pm.Error.NotImplementedError();
+            var keys:Array<Dynamic> = idx.allKeys();
+            // var rows:Array<Dynamic> = new Array();
+            var operand = switch query.value {
+               case Const(value): value;
+               case Expr(e): e.eval(stmt.context);
+            }
+
+            // Haxe == Bananas
+            var getKeys = [];
+            for (key in keys) {
+               if (key != operand) {
+                  // for (x in idx.getByKey)
+                  getKeys.push(key);
+               }
+            }
+				var rows = idx.getByKeys(getKeys); 
+            for (i in 0...rows.length) {
+               out(rows[i], i);
+            }
+            return true;
+
          case Greater:
             throw new pm.Error.NotImplementedError();
          case Lesser:
