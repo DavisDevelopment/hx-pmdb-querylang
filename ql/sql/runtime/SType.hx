@@ -47,6 +47,11 @@ class STypes {
 					case 'Array': TArray(fromCType(params[0]));
 					case 'Map': TMap(fromCType(params[0]), fromCType(params[1]));
 					case 'Null': fromCType(params[0]);
+					case _.afterLast('.') => typeName: switch typeName {
+						case 'DateTime': TDate;
+						default:
+							throw new pm.Error('Unhandled $name');
+					}
 					case other:
 						throw new pm.Error('Unhandled $other');
 				}

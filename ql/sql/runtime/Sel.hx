@@ -168,20 +168,26 @@ class SelectImpl {
 		}
     }
 
+    private var _planFailed:Bool = false;
     public function apply(sel:Sel<Dynamic, Dynamic, Dynamic>, ?interp:Interpreter):Array<Dynamic> {
-        if (sel.plan != null) {
+        if (sel.plan != null && !_planFailed) {
             var accumulator:Array<Dynamic> = new Array();
             function reduc(a:Array<Dynamic/*OutRow*/>, row:Dynamic/*InRow*/):Array<Dynamic> {
                 a.push(row);
                 return a;
             }
+
             final success = sel.plan.candidates(function(current:Dynamic, offset:Int) {
                 accumulator = reduc(accumulator, current);
                 return true;
             });
 
-            if (!success)
-                throw new pm.Error('you\'re a failure, dude.');
+            if (!success) {
+                _planFailed = true;
+                // throw new pm.Error('you\'re a failure, dude.');
+                Console.error('Optimized candidate computation failed');
+                return applyNaive(sel, interp);
+            }
 
             return accumulator;
         }

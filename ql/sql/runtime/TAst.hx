@@ -621,8 +621,15 @@ class TExprTypeTools {
                 add(')');
             
 			case TBinop(op, _.expr => left, _.expr =>right):
+                var sop:String = printbinop(op);
+                var space = (~/[a-zA-Z]/.match(sop));
+
                 printExpr(left, out);
+                if (space)
+                    add(' ');
                 add(printbinop(op));
+                if (space)
+                    add(' ');
                 printExpr(right, out);
             
             case TUnop(op, post, e):
